@@ -8,6 +8,6 @@ rate = st.number_input("年利 (%)", value=10.0)
 days = st.number_input("運用日数", value=30)
 compound = st.checkbox("複利運用")
 
-if st.button("計算"):
+if st.button("計算"): 
     result = calculate_apr(principal, rate, days, compound)
     st.success(f"結果: {result:,.2f}")
