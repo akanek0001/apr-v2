@@ -1,13 +1,17 @@
-# app.py  (PRO版: ページ状態保持 + ヘルプ内蔵 + Master/Elite(67/60) + LINE登録台帳(LineUsers)連携
-#         + サイドバー行間 + 管理画面プロ機能（検索/編集/停止切替）
-#         + ★メンバー選択で個別LINE送信（任意で画像添付）)
+
+# app.py  (PRO版: 管理者ごとに分離して同じAPR運用ができるマルチ管理者版)
+# - 管理者ログインは「管理者選択 + PIN」
+# - 管理者ごとに別シートでデータを分離（Settings/Members/Ledger/LineUsers を admin_namespace で分岐）
+# - ★LINE tokenも admin_namespace に応じて切替（line.tokens[namespace]）
+# - UI/機能はこれまでのPRO版と同等（APR / 入出金 / 管理 / ヘルプ + サイドバー行間 + 個別LINE送信）
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
-import json　
+import json
 import pandas as pd
 import requests
 import streamlit as st
@@ -20,6 +24,12 @@ JST = timezone(timedelta(hours=9), "JST")
 
 STATUS_ON = "🟢運用中"
 STATUS_OFF = "🔴停止"
+RANK_LABEL = "👑Master=67% / 🥈Elite=60%"
+
+BASE_SETTINGS = "Settings"
+BASE_MEMBERS = "Members"
+BASE_LEDGER = "Ledger"
+BASE_LINEUSERS = "LineUsers"
 
 
 # -----------------------------
@@ -121,6 +131,65 @@ def dedup_line_ids(df: pd.DataFrame) -> List[str]:
     return out
 
 
+def insert_person_name(msg_common: str, person_name: str) -> str:
+    """
+    送信時に個人名「〇〇 様」を自動挿入する。
+    - 1行目が「【ご連絡】」ならその次に挿入
+    - それ以外なら先頭に挿入
+    - すでに「〇〇 様」が含まれていれば二重挿入しない
+    """
+    name_line = f"{person_name} 様"
+    lines = msg_common.splitlines()
+    if name_line in lines:
+        return msg_common
+
+    if lines and lines[0].strip() == "【ご連絡】":
+        return "\n".join([lines[0], name_line] + lines[1:])
+    return "\n".join([name_line] + lines)
+
+
+def sheet_name(base: str, ns: str) -> str:
+    """
+    管理者namespaceに応じて、シート名を分岐。
+    - ns が "default" / 空: base そのまま
+    - それ以外: base__<ns> 形式
+    """
+    ns = str(ns or "").strip()
+    if not ns or ns == "default":
+        return base
+    return f"{base}__{ns}"
+
+
+def get_line_token(ns: str) -> str:
+    """
+    ★LINE token を namespace ごとに切替する。
+    secrets 推奨:
+      [line]
+      tokens = { A="...", B="...", C="...", D="..." }
+
+    互換:
+      [line]
+      channel_access_token = "..."
+    """
+    ns = str(ns or "").strip()
+    line = st.secrets.get("line", {}) or {}
+
+    tokens = line.get("tokens", None)
+    if tokens:
+        # tomlのinline tableは dict として読めます
+        tok = str(tokens.get(ns, "")).strip()
+        if tok:
+            return tok
+
+    # legacy fallback
+    legacy = str(line.get("channel_access_token", "")).strip()
+    if legacy:
+        return legacy
+
+    st.error("LINEトークンが未設定です。secretsの [line].tokens または channel_access_token を確認してください。")
+    st.stop()
+
+
 # -----------------------------
 # LINE
 # -----------------------------
@@ -190,18 +259,126 @@ LEDGER_HEADERS = [
     "LINE_DisplayName",
     "Source",
 ]
-
-LINEUSERS_SHEET = "LineUsers"
 LINEUSERS_HEADERS = ["Date", "Time", "Type", "Line_User_ID", "Line_User"]
 
 
+# -----------------------------
+# Admin (multi)
+# -----------------------------
+@dataclass
+class AdminUser:
+    name: str
+    pin: str
+    namespace: str  # シート分離/LINE分離用（例: "A", "B", "C", "D"）
+
+
+def load_admin_users() -> List[AdminUser]:
+    """
+    secrets例（推奨）:
+    [admin]
+    users = [
+      { name="管理者A", pin="1111", namespace="A" },
+      { name="管理者B", pin="2222", namespace="B" }
+    ]
+
+    旧形式互換:
+    [admin]
+    pin = "1234"
+    """
+    a = st.secrets.get("admin", {}) or {}
+
+    users = a.get("users", None)
+    if users:
+        out: List[AdminUser] = []
+        for u in users:
+            name = str(u.get("name", "")).strip() or "Admin"
+            pin = str(u.get("pin", "")).strip()
+            ns = str(u.get("namespace", "")).strip() or name
+            if not pin:
+                continue
+            out.append(AdminUser(name=name, pin=pin, namespace=ns))
+        if out:
+            return out
+
+    # legacy
+    pin = str(a.get("pin", "")).strip() or str(a.get("password", "")).strip()
+    if pin:
+        return [AdminUser(name="Admin", pin=pin, namespace="default")]
+
+    return []
+
+
+def require_admin_login_multi() -> None:
+    """
+    管理者を選択してログイン。ログイン成功するまでアプリに入れない。
+    """
+    admins = load_admin_users()
+    if not admins:
+        st.error("Secrets に [admin].users（推奨）または [admin].pin が未設定です。")
+        st.stop()
+
+    if st.session_state.get("admin_ok", False) and st.session_state.get("admin_namespace"):
+        return
+
+    st.markdown("## 🔐 管理者ログイン")
+
+    names = [a.name for a in admins]
+    default_name = st.session_state.get("login_admin_name", names[0])
+    if default_name not in names:
+        default_name = names[0]
+
+    with st.form("admin_gate_multi", clear_on_submit=False):
+        admin_name = st.selectbox("管理者を選択", names, index=names.index(default_name))
+        pw = st.text_input("管理者PIN", type="password")
+        ok = st.form_submit_button("ログイン")
+
+        if ok:
+            st.session_state["login_admin_name"] = admin_name
+            picked = next((a for a in admins if a.name == admin_name), None)
+            if not picked:
+                st.error("管理者が見つかりません。")
+                st.stop()
+
+            if pw == picked.pin:
+                st.session_state["admin_ok"] = True
+                st.session_state["admin_name"] = picked.name
+                st.session_state["admin_namespace"] = picked.namespace
+                st.rerun()
+            else:
+                st.session_state["admin_ok"] = False
+                st.session_state["admin_name"] = ""
+                st.session_state["admin_namespace"] = ""
+                st.error("PINが違います。")
+
+    st.stop()
+
+
+def current_admin_label() -> str:
+    name = str(st.session_state.get("admin_name", "")).strip() or "Admin"
+    ns = str(st.session_state.get("admin_namespace", "")).strip() or "default"
+    return f"{name}（namespace: {ns}）"
+
+
+# -----------------------------
+# Google Sheets
+# -----------------------------
 @dataclass
 class GSheetsConfig:
     spreadsheet_id: str
-    settings_sheet: str = "Settings"
-    members_sheet: str = "Members"
-    ledger_sheet: str = "Ledger"
-    lineusers_sheet: str = LINEUSERS_SHEET
+    settings_sheet: str
+    members_sheet: str
+    ledger_sheet: str
+    lineusers_sheet: str
+
+
+def build_gs_config(spreadsheet_id: str, ns: str) -> GSheetsConfig:
+    return GSheetsConfig(
+        spreadsheet_id=spreadsheet_id,
+        settings_sheet=sheet_name(BASE_SETTINGS, ns),
+        members_sheet=sheet_name(BASE_MEMBERS, ns),
+        ledger_sheet=sheet_name(BASE_LEDGER, ns),
+        lineusers_sheet=sheet_name(BASE_LINEUSERS, ns),
+    )
 
 
 class GSheets:
@@ -239,7 +416,7 @@ class GSheets:
         try:
             ws = self._ws(name)
         except Exception:
-            ws = self.book.add_worksheet(title=name, rows=1000, cols=max(20, len(headers) + 5))
+            ws = self.book.add_worksheet(title=name, rows=2000, cols=max(30, len(headers) + 10))
             ws.append_row(headers, value_input_option="USER_ENTERED")
             return
 
@@ -281,49 +458,6 @@ class GSheets:
 
 
 # -----------------------------
-# Admin Auth（pin優先、なければpassword）
-# -----------------------------
-def admin_secret() -> str:
-    a = st.secrets.get("admin", {})
-    pin = str(a.get("pin", "")).strip()
-    pw = str(a.get("password", "")).strip()
-    return pin or pw
-
-
-def is_admin() -> bool:
-    return bool(st.session_state.get("admin_ok", False))
-
-
-def admin_login_ui() -> None:
-    required = admin_secret()
-    if not required:
-        st.warning("Secrets に [admin].pin（または password）が未設定です。")
-        st.session_state["admin_ok"] = False
-        return
-
-    if is_admin():
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            st.success("管理者ログイン中")
-        with c2:
-            if st.button("ログアウト", use_container_width=True):
-                st.session_state["admin_ok"] = False
-                st.rerun()
-        return
-
-    with st.form("admin_login", clear_on_submit=False):
-        pw = st.text_input("管理者PIN", type="password")
-        ok = st.form_submit_button("ログイン")
-        if ok:
-            if pw == required:
-                st.session_state["admin_ok"] = True
-                st.rerun()
-            else:
-                st.session_state["admin_ok"] = False
-                st.error("PINが違います。")
-
-
-# -----------------------------
 # Load / domain
 # -----------------------------
 def load_settings(gs: GSheets) -> pd.DataFrame:
@@ -334,7 +468,7 @@ def load_settings(gs: GSheets) -> pd.DataFrame:
     need = ["Project_Name", "IsCompound"]
     missing = [c for c in need if c not in df.columns]
     if missing:
-        st.error(f"Settingsシートの列が不足: {missing}")
+        st.error(f"Settingsシート({gs.cfg.settings_sheet})の列が不足: {missing}")
         st.stop()
 
     df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
@@ -360,7 +494,7 @@ def load_members(gs: GSheets) -> pd.DataFrame:
     need = ["Project_Name", "PersonName", "Principal", "Line_User_ID", "LINE_DisplayName", "IsActive"]
     missing = [c for c in need if c not in df.columns]
     if missing:
-        st.error(f"Membersシートの列が不足: {missing}")
+        st.error(f"Membersシート({gs.cfg.members_sheet})の列が不足: {missing}")
         st.stop()
 
     df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
@@ -389,9 +523,7 @@ def load_line_users(gs: GSheets) -> pd.DataFrame:
     need = ["Line_User_ID", "Line_User"]
     missing = [c for c in need if c not in df.columns]
     if missing:
-        st.error(
-            f"{gs.cfg.lineusers_sheet} シートの列が不足: {missing}（Make.com の Add a Row の列名を合わせてください）"
-        )
+        st.error(f"{gs.cfg.lineusers_sheet} シートの列が不足: {missing}")
         return pd.DataFrame()
 
     df["Line_User_ID"] = df["Line_User_ID"].astype(str).str.strip()
@@ -444,6 +576,7 @@ def validate_no_dup_lineid_within_project(members_df: pd.DataFrame, project: str
 # -----------------------------
 def ui_apr(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> None:
     st.subheader("📈 APR 確定（Master=67% / Elite=60%）")
+    st.caption(f"{RANK_LABEL} / 管理者: {current_admin_label()}")
 
     projects = active_projects(settings_df)
     if not projects:
@@ -487,10 +620,6 @@ def ui_apr(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> 
         show["DailyAPR"] = show["DailyAPR"].apply(lambda x: fmt_usd(float(x)))
         st.dataframe(show, use_container_width=True, hide_index=True)
 
-    if not is_admin():
-        st.info("APR確定は管理者のみ実行できます（⚙️管理でログイン）。")
-        return
-
     if st.button("APRを確定して全員にLINE送信"):
         evidence_url = None
         if uploaded:
@@ -522,14 +651,15 @@ def ui_apr(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> 
                         members_df.loc[i, "UpdatedAt_JST"] = ts
             write_members(gs, members_df)
 
-        token = st.secrets["line"]["channel_access_token"]
+        ns = str(st.session_state.get("admin_namespace", "")).strip() or "default"
+        token = get_line_token(ns)
         targets = dedup_line_ids(mem)
 
         msg = "🏦【APR収益報告】\n"
         msg += f"プロジェクト: {project}\n"
         msg += f"報告日時: {now_jst().strftime('%Y/%m/%d %H:%M')}\n\n"
         msg += f"APR: {apr}%\n"
-        msg += "Master: 67% / Elite: 60%\n"
+        msg += f"{RANK_LABEL}\n"
         msg += f"人数: {n_total}（Master {n_master} / Elite {n_elite}）\n"
         msg += f"本日総配当: {fmt_usd(total_reward)}\n"
         msg += f"モード: {'複利' if is_compound else '単利'}\n"
@@ -554,6 +684,7 @@ def ui_apr(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> 
 # -----------------------------
 def ui_cash(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> None:
     st.subheader("💸 入金 / 出金（個別LINE通知）")
+    st.caption(f"{RANK_LABEL} / 管理者: {current_admin_label()}")
 
     projects = active_projects(settings_df)
     if not projects:
@@ -577,15 +708,10 @@ def ui_cash(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) ->
     note = st.text_input("メモ（任意）", value="")
     uploaded = st.file_uploader("エビデンス画像（任意）", type=["png", "jpg", "jpeg"], key="cash_img")
 
-    if not is_admin():
-        st.info("入金/出金の記録は管理者のみ実行できます（⚙️管理でログイン）。")
-        return
-
     if st.button("確定して保存＆個別にLINE通知"):
         if amt <= 0:
             st.warning("金額が0です。")
             return
-
         if typ == "Withdraw" and float(amt) > current:
             st.error("出金額が現在残高を超えています。")
             return
@@ -613,7 +739,9 @@ def ui_cash(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) ->
 
         write_members(gs, members_df)
 
-        token = st.secrets["line"]["channel_access_token"]
+        ns = str(st.session_state.get("admin_namespace", "")).strip() or "default"
+        token = get_line_token(ns)
+
         msg = "💸【入出金通知】\n"
         msg += f"プロジェクト: {project}\n"
         msg += f"日時: {now_jst().strftime('%Y/%m/%d %H:%M')}\n"
@@ -632,7 +760,6 @@ def ui_cash(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) ->
             st.success("保存＆送信完了")
         else:
             st.warning(f"保存は完了。LINE送信が失敗（HTTP {code}）")
-
         st.rerun()
 
 
@@ -640,12 +767,8 @@ def ui_cash(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) ->
 # UI: Admin（PRO + 個別LINE送信）
 # -----------------------------
 def ui_admin(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> pd.DataFrame:
-    st.subheader("⚙️ 管理（管理者のみ）")
-    admin_login_ui()
-
-    if not is_admin():
-        st.info("ログインすると、メンバー追加・編集が表示されます。")
-        return members_df
+    st.subheader("⚙️ 管理")
+    st.caption(f"{RANK_LABEL} / 管理者: {current_admin_label()}")
 
     projects = active_projects(settings_df)
     if not projects:
@@ -656,7 +779,7 @@ def ui_admin(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -
 
     # Make.com 登録台帳
     line_users_df = load_line_users(gs)
-    line_users = []
+    line_users: List[Tuple[str, str, str]] = []
     if not line_users_df.empty:
         tmp = line_users_df.copy()
         tmp = tmp[tmp["Line_User_ID"].astype(str).str.startswith("U")]
@@ -695,24 +818,21 @@ def ui_admin(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -
 
     st.divider()
 
-    # --- ★ 個別LINE送信（メンバー選択） ---
-    st.markdown("#### 📨 メンバーから選択して個別にLINE送信（管理者）")
+    # --- 個別LINE送信 ---
+    st.markdown("#### 📨 メンバーから選択して個別にLINE送信（個人名 自動挿入）")
 
     if view_all.empty:
         st.info("メンバーがいないため送信できません。")
     else:
-        # 送信対象リスト（全員 or 運用中のみ）
         target_mode = st.radio("対象", ["🟢運用中のみ", "全メンバー（停止含む）"], horizontal=True)
         cand = view_all.copy() if target_mode.startswith("全") else view_all[view_all["IsActive"] == True].copy()
         cand = cand.reset_index(drop=True)
 
-        # 選択肢ラベル
         def _label(r: pd.Series) -> str:
             name = str(r.get("PersonName", "")).strip()
             disp = str(r.get("LINE_DisplayName", "")).strip()
             uid = str(r.get("Line_User_ID", "")).strip()
             stt = bool_to_status(r.get("IsActive", True))
-            # 表示名が空ならUIDも見せる
             if disp:
                 return f"{stt} {name} / {disp}"
             return f"{stt} {name} / {uid}"
@@ -724,8 +844,12 @@ def ui_admin(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -
         default_msg += f"プロジェクト: {project}\n"
         default_msg += f"日時: {now_jst().strftime('%Y/%m/%d %H:%M')}\n\n"
 
-        msg = st.text_area("メッセージ本文", value=st.session_state.get("direct_line_msg", default_msg), height=180)
-        st.session_state["direct_line_msg"] = msg
+        msg_common = st.text_area(
+            "メッセージ本文（共通）※送信時に「〇〇 様」を自動挿入します",
+            value=st.session_state.get("direct_line_msg", default_msg),
+            height=180
+        )
+        st.session_state["direct_line_msg"] = msg_common
 
         img = st.file_uploader("添付画像（任意・ImgBB）", type=["png", "jpg", "jpeg"], key="direct_line_img")
 
@@ -742,7 +866,7 @@ def ui_admin(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -
         if do_send:
             if not selected:
                 st.warning("送信先を選択してください。")
-            elif not msg.strip():
+            elif not msg_common.strip():
                 st.warning("メッセージが空です。")
             else:
                 evidence_url = None
@@ -753,11 +877,10 @@ def ui_admin(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -
                         st.error("画像アップロードに失敗しました（ImgBB）。画像を外して再実行してください。")
                         return members_df
 
-                token = st.secrets["line"]["channel_access_token"]
+                ns = str(st.session_state.get("admin_namespace", "")).strip() or "default"
+                token = get_line_token(ns)
 
-                # 選択ラベル -> 行に復元（ラベルはユニークとは限らないので index で処理）
-                # ここでは label一致で拾う（重複の可能性がある運用なら PersonName をユニークにしてください）
-                label_to_row = { _label(cand.loc[i]): cand.loc[i] for i in range(len(cand)) }
+                label_to_row = {_label(cand.loc[i]): cand.loc[i] for i in range(len(cand))}
 
                 success, fail = 0, 0
                 failed_list = []
@@ -768,13 +891,18 @@ def ui_admin(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -
                         fail += 1
                         failed_list.append(lab)
                         continue
+
                     uid = str(r.get("Line_User_ID", "")).strip()
+                    person_name = str(r.get("PersonName", "")).strip()
+
                     if not is_line_uid(uid):
                         fail += 1
                         failed_list.append(f"{lab}（Line_User_ID不正）")
                         continue
 
-                    code = send_line_push(token, uid, msg, evidence_url)
+                    personalized = insert_person_name(msg_common, person_name)
+                    code = send_line_push(token, uid, personalized, evidence_url)
+
                     if code == 200:
                         success += 1
                     else:
@@ -950,10 +1078,11 @@ def ui_admin(gs: GSheets, settings_df: pd.DataFrame, members_df: pd.DataFrame) -
 
 
 # -----------------------------
-# UI: Help
+# UI: Help（あなたが指定したヘルプ構成）
 # -----------------------------
-def ui_help() -> None:
+def ui_help(gs: GSheets) -> None:
     st.subheader("❓ ヘルプ / 使い方")
+    st.caption(f"{RANK_LABEL} / 管理者: {current_admin_label()}")
 
     st.markdown(
         f"""
@@ -963,17 +1092,17 @@ def ui_help() -> None:
 - **{STATUS_ON}**：APR計算対象 / LINE送信対象  
 - **{STATUS_OFF}**：対象外（運用から外す）
 
-⚙️管理には、**メンバー選択で個別LINE送信**（任意で画像添付）があります。
+⚙️管理の「個別LINE送信」は、送信時に **個人名（〇〇 様）** を自動挿入します。
 """
     )
 
     with st.expander("0) Make.com（LINE登録フローのゴール）", expanded=False):
         st.markdown(
-            """
+            f"""
 ゴール（完成形）  
 `LINE Watch Events → HTTP(プロフィール取得) → Google Sheets(Search Rowsで重複チェック) → Filter(0件のみ) → Google Sheets(Add a Rowで追記)`
 
-このアプリは、その結果として作られる **LineUsers** シートを読み込み、⚙️管理の「追加」で自動入力に使います。
+このアプリは、その結果として作られる **{gs.cfg.lineusers_sheet}** シートを読み込み、⚙️管理の「追加」で自動入力に使います。
 """
         )
 
@@ -985,32 +1114,26 @@ def ui_help() -> None:
 - **Secrets（Streamlit Cloud）**  
   - `[connections.gsheets].spreadsheet`：スプレッドシートURLまたはID  
   - `[connections.gsheets.credentials]`：サービスアカウントJSONの各キー  
-  - `[line].channel_access_token`：LINE Messaging API  
+  - `[line].tokens`：LINE Messaging API（管理者namespaceごとに分ける）
   - `[imgbb].api_key`：ImgBB（画像添付するなら）
-  - `[admin].pin`（またはpassword）：管理者ログイン用
+  - `[admin].users`：管理者ごとのPIN（推奨）
 """
         )
 
     with st.expander("2) シート構成（列名は変更しない）", expanded=False):
         st.markdown("### Settings（プロジェクト設定）")
         st.code("\t".join(SETTINGS_HEADERS))
-
         st.markdown("### Members（メンバー台帳）")
         st.code("\t".join(MEMBERS_HEADERS))
-        st.markdown(
-            f"""
-- `Rank`：Master / Elite  
-  - Master = 67%
-  - Elite = 60%
-- `IsActive`：内部フラグ（UIでは **{STATUS_ON} / {STATUS_OFF}** と表示）
-"""
-        )
-
         st.markdown("### Ledger（履歴）")
         st.code("\t".join(LEDGER_HEADERS))
-
         st.markdown("### LineUsers（Make.comで作るLINEユーザー登録台帳）")
         st.code("\t".join(LINEUSERS_HEADERS))
+        st.info(
+            f"※このマルチ管理者版では、管理者namespaceごとにシートが分かれます。\n"
+            f"今の管理者の実シート名:\n"
+            f"- {gs.cfg.settings_sheet}\n- {gs.cfg.members_sheet}\n- {gs.cfg.ledger_sheet}\n- {gs.cfg.lineusers_sheet}"
+        )
 
     with st.expander("3) ⚙️管理の機能", expanded=False):
         st.markdown(
@@ -1018,7 +1141,7 @@ def ui_help() -> None:
 - 検索でメンバーを絞り込み
 - ワンタップで {STATUS_ON}/{STATUS_OFF} 切替
 - 一括編集（Rank/残高/状態/LINE名など）→ 保存で反映
-- メンバー選択で **個別LINE送信**（画像添付も可）
+- メンバー選択で **個別LINE送信**（画像添付も可 / 個人名自動挿入）
 - 追加はLineUsers台帳から選択すると Line_User_ID / LINE_DisplayName を自動入力
 
 **重要（重複防止）**  
@@ -1034,6 +1157,9 @@ def ui_help() -> None:
 def main():
     st.set_page_config(page_title="APR資産運用管理", layout="wide", page_icon="🏦")
     st.title("🏦 APR資産運用管理システム")
+
+    # ★管理者選択 + PIN ログイン（成功まで進めない）
+    require_admin_login_multi()
 
     # Sidebar spacing（メニュー行間）
     st.markdown(
@@ -1051,9 +1177,20 @@ def main():
         unsafe_allow_html=True,
     )
 
+    # ログアウト（全ページ共通）
+    with st.sidebar:
+        st.caption(f"👤 {current_admin_label()}")
+        if st.button("🔓 ログアウト", use_container_width=True):
+            st.session_state["admin_ok"] = False
+            st.session_state["admin_name"] = ""
+            st.session_state["admin_namespace"] = ""
+            st.rerun()
+
+    # page state
     if "page" not in st.session_state:
         st.session_state["page"] = "📈 APR"
 
+    # Spreadsheet ID
     con = st.secrets.get("connections", {}).get("gsheets", {})
     sid_raw = str(con.get("spreadsheet", "")).strip()
     sid = extract_sheet_id(sid_raw)
@@ -1061,7 +1198,8 @@ def main():
         st.error("Secrets の [connections.gsheets].spreadsheet が未設定です（URLまたはID）。")
         st.stop()
 
-    gs = GSheets(GSheetsConfig(spreadsheet_id=sid))
+    ns = str(st.session_state.get("admin_namespace", "")).strip() or "default"
+    gs = GSheets(build_gs_config(spreadsheet_id=sid, ns=ns))
 
     try:
         settings_df = load_settings(gs)
@@ -1083,9 +1221,9 @@ def main():
     elif page == "💸 入金/出金":
         ui_cash(gs, settings_df, members_df)
     elif page == "⚙️ 管理":
-        members_df = ui_admin(gs, settings_df, members_df)
+        ui_admin(gs, settings_df, members_df)
     else:
-        ui_help()
+        ui_help(gs)
 
 
 if __name__ == "__main__":
