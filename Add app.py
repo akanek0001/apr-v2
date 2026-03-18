@@ -1521,8 +1521,7 @@ OCR → APR確定 → 自動送信
 class AppController:
 
     def __init__(self):
-
-        sheet_id = U.extract_sheet_id(st.secrets["spreadsheet"]["id"])
+sheet_id = U.extract_sheet_id(st.secrets["connections"]["gsheets"]["spreadsheet"])
 
         namespace = AdminAuth.current_namespace()
 
