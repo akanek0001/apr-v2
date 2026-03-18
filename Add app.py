@@ -1520,14 +1520,13 @@ OCR → APR確定 → 自動送信
 # =========================================================
 class AppController:
 
-def __init__(self):
+    def __init__(self):
 
-    sheet_id = U.extract_sheet_id(st.secrets["connections"]["gsheets"]["spreadsheet"])
+        sheet_id = U.extract_sheet_id(st.secrets["connections"]["gsheets"]["spreadsheet"])
 
-    namespace = AdminAuth.current_namespace()
+        namespace = AdminAuth.current_namespace()
 
-    gs = GSheetService(sheet_id, namespace)
-
+        gs = GSheetService(sheet_id, namespace)
         self.repo = Repository(gs)
 
         self.engine = FinanceEngine()
