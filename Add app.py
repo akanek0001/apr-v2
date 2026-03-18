@@ -153,7 +153,7 @@ class AdminAuth:
 
         st.title("Admin Login")
 
-        pin = st.text_input("PIN", type="password")
+      if pin == (st.secrets.get("admin", {}).get("pin") or st.secrets.get("admin", {}).get("users", [{}])[0].get("pin")):
 
         if st.button("Login"):
             if pin == st.secrets["admin"]["pin"]:
