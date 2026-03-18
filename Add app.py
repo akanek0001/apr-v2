@@ -142,27 +142,32 @@ class U:
 
 class AdminAuth:
 
-    @staticmethod
-    def require_login():
+ @staticmethod
+def require_login():
 
-        if "admin_ok" not in st.session_state:
-            st.session_state["admin_ok"] = False
+    if "admin_ok" not in st.session_state:
+        st.session_state["admin_ok"] = False
 
-        if st.session_state["admin_ok"]:
-            return
+    if st.session_state["admin_ok"]:
+        return
 
-        st.title("Admin Login")
+    st.title("Admin Login")
 
-      if pin == (st.secrets.get("admin", {}).get("pin") or st.secrets.get("admin", {}).get("users", [{}])[0].get("pin")):
+    pin = st.text_input("PIN", type="password")
 
-        if st.button("Login"):
-            if pin == st.secrets["admin"]["pin"]:
-                st.session_state["admin_ok"] = True
-                st.session_state["admin_namespace"] = "A"
-                st.session_state["admin_name"] = "Admin"
-                st.rerun()
+    if st.button("Login"):
+        valid_pin = (
+            st.secrets.get("admin", {}).get("pin")
+            or st.secrets.get("admin", {}).get("users", [{}])[0].get("pin")
+        )
 
-        st.stop()
+        if pin == valid_pin:
+            st.session_state["admin_ok"] = True
+            st.session_state["admin_namespace"] = "A"
+            st.session_state["admin_name"] = "Admin"
+            st.rerun()
+
+    st.stop()
 
     @staticmethod
     def current_namespace() -> str:
