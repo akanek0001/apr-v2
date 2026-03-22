@@ -1,28 +1,3 @@
-import streamlit as st
-
-# --- デバッグ開始 ---
-st.write("🔍 デバッグ: プログラムが起動しました")
-
-try:
-    if "admin" not in st.secrets:
-        st.error("❌ エラー: Secrets に [admin] セクションが見つかりません。")
-        st.stop()
-    else:
-        st.success("✅ Secrets [admin] 読み込み成功")
-        
-    if "connections" not in st.secrets:
-        st.error("❌ エラー: Secrets に [connections.gsheets] が見つかりません。")
-        st.stop()
-    else:
-        st.success("✅ Secrets [connections] 読み込み成功")
-except Exception as e:
-    st.error(f"⚠️ Secrets 読み込み中に致命的なエラー: {e}")
-    st.stop()
-
-st.write("🚀 次のステップ：認証とサービスのセットアップを開始します...")
-# --- デバッグ終了 ---
-
-
 from __future__ import annotations
 
 # =========================================================
