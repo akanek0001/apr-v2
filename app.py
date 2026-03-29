@@ -789,12 +789,17 @@ class ExternalService:
         crop_right_ratio: float,
         crop_bottom_ratio: float,
     ) -> str:
+        # ── API キー取得 ──
         try:
             api_key = st.secrets["ocrspace"]["api_key"]
-        except Exception:
-            return ""
+        except Exception as e:
+            return f"[OCRエラー] APIキー取得失敗: secrets['ocrspace']['api_key'] が見つかりません。({e})"
+
+        if not api_key or str(api_key).strip() in ("", "YOUR_API_KEY"):
+            return "[OCRエラー] APIキーが空または未設定です。Streamlit SecretsにAPIキーを設定してください。"
 
         texts: List[str] = []
+        api_errors: List[str] = []
 
         try:
             cropped_bytes = U.crop_image_by_ratio(
@@ -826,11 +831,19 @@ class ExternalService:
                             timeout=60,
                         )
                         data = res.json()
+                        # API側エラーを記録
+                        if data.get("IsErroredOnProcessing"):
+                            err_msgs = data.get("ErrorMessage", [])
+                            if isinstance(err_msgs, list):
+                                api_errors.extend(err_msgs)
+                            elif err_msgs:
+                                api_errors.append(str(err_msgs))
                         for p in data.get("ParsedResults", []):
                             txt = str(p.get("ParsedText", "")).strip()
                             if txt:
                                 texts.append(txt)
-                    except Exception:
+                    except Exception as req_e:
+                        api_errors.append(f"リクエストエラー(engine={engine}): {req_e}")
                         continue
 
             uniq, seen = [], set()
@@ -840,10 +853,17 @@ class ExternalService:
                     seen.add(key)
                     uniq.append(key)
 
-            return "\n\n".join(uniq)
+            result = "\n\n".join(uniq)
 
-        except Exception:
-            return ""
+            # テキストが取れなかった場合はAPIエラーを返す
+            if not result and api_errors:
+                unique_errs = list(dict.fromkeys(api_errors))
+                return "[OCRエラー] " + " / ".join(unique_errs)
+
+            return result
+
+        except Exception as e:
+            return f"[OCRエラー] 予期しないエラー: {e}"
 
 
 # =========================================================
