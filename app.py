@@ -48,6 +48,7 @@ class AppConfig:
         "LINEUSERS": "LineUsers",
         "APR_SUMMARY": "APR_Summary",
         "SMARTVAULT_HISTORY": "SmartVault_History",
+        "USDC_HISTORY": "USDC_History",
     }
 
     HEADERS = {
@@ -111,6 +112,17 @@ class AppConfig:
             "OCR_Yesterday_Profit",
             "OCR_APR",
             "Evidence_URL",
+            "Admin_Name",
+            "Admin_Namespace",
+            "Note",
+        ],
+        "USDC_HISTORY": [
+            "Recorded_At_JST",
+            "Project_Name",
+            "USDC_Date",
+            "USDC_Time",
+            "USDC_Datetime_JST",
+            "Amount",
             "Admin_Name",
             "Admin_Namespace",
             "Note",
@@ -1287,6 +1299,32 @@ class Repository:
             ],
         )
 
+    def append_usdc_history_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        project: str,
+        admin_name: str,
+        admin_namespace: str,
+        note: str = "",
+    ) -> None:
+        """Write USDC transaction history rows (from OCR) to USDC_History sheet."""
+        recorded_at = U.fmt_dt(U.now_jst())
+        for r in rows:
+            self.gs.append_row(
+                "USDC_HISTORY",
+                [
+                    recorded_at,
+                    str(project),
+                    r.get("date_str", ""),
+                    r.get("time_str", ""),
+                    r.get("datetime_jst", ""),
+                    float(r.get("amount", 0.0)),
+                    admin_name or "",
+                    admin_namespace or "",
+                    note or "",
+                ],
+            )
+
     def active_projects(self, settings_df: pd.DataFrame) -> List[str]:
         if settings_df.empty:
             return []
@@ -1989,13 +2027,34 @@ class AppUI:
                         ])
                         st.dataframe(rows_df, use_container_width=True, hide_index=True)
                         st.markdown(f"**合計: {U.fmt_usd(total_amount)}**")
-                        if st.button(
-                            f"💰 昨日の収益 = {U.fmt_usd(total_amount)} として設定",
-                            key="usdc_set_profit_apr",
-                        ):
-                            st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
-                            st.session_state["ocr_yesterday_profit"] = total_amount
-                            st.rerun()
+
+                        col_set, col_save = st.columns(2)
+                        with col_set:
+                            if st.button(
+                                f"💰 昨日の収益 = {U.fmt_usd(total_amount)} として設定",
+                                key="usdc_set_profit_apr",
+                                use_container_width=True,
+                            ):
+                                st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
+                                st.session_state["ocr_yesterday_profit"] = total_amount
+                                st.rerun()
+                        with col_save:
+                            if st.button(
+                                "📊 USDC履歴をシートに保存",
+                                key="usdc_save_to_sheet",
+                                use_container_width=True,
+                            ):
+                                try:
+                                    self.repo.append_usdc_history_rows(
+                                        rows=usdc_rows,
+                                        project=str(project),
+                                        admin_name=AdminAuth.current_label(),
+                                        admin_namespace=AdminAuth.current_namespace(),
+                                    )
+                                    st.success(f"✅ {len(usdc_rows)} 件を USDC_History シートに保存しました。")
+                                except Exception as _e:
+                                    st.error(f"保存エラー: {_e}")
+
                         with st.expander("OCR生テキスト（USDC履歴）", expanded=False):
                             st.text(usdc_result.get("raw_text") or "（テキスト取得なし）")
                     else:
@@ -2670,6 +2729,7 @@ Ledger             = {gs.names.LEDGER}
 LineUsers          = {gs.names.LINEUSERS}
 APR_Summary        = {gs.names.APR_SUMMARY}
 SmartVault_History = {gs.names.SMARTVAULT_HISTORY}
+USDC_History       = {gs.names.USDC_HISTORY}
 
 Spreadsheet ID
 {gs.spreadsheet_id}
@@ -2692,6 +2752,8 @@ Spreadsheet URL
             st.code("\t".join(AppConfig.HEADERS["APR_SUMMARY"]))
             st.markdown("### SmartVault_History")
             st.code("\t".join(AppConfig.HEADERS["SMARTVAULT_HISTORY"]))
+            st.markdown("### USDC_History")
+            st.code("\t".join(AppConfig.HEADERS["USDC_HISTORY"]))
 
         with st.expander("3. Compound_Timing の意味", expanded=False):
             st.markdown(
@@ -2888,6 +2950,10 @@ Settings シートの不足列補完、PERSONAL行の不足補完、OCR初期座
                             "APR": {"left": float(sv_apr_left), "top": float(sv_apr_top), "right": float(sv_apr_right), "bottom": float(sv_apr_bottom)},
                         }
                         st.markdown("##### 📱 SmartVault 3ゾーン赤枠プレビュー")
+                        st.caption(
+                            "⚠️ この赤枠は **SmartVaultサマリー画面専用** です。"
+                            "USDC取引履歴スクリーンショットには適用されません（取引履歴は全画面OCRで自動読み取り）。"
+                        )
                         sv_boxed = U.draw_ocr_boxes(file_bytes, sv_preview_boxes)
                         st.image(sv_boxed, caption="SmartVault 3ゾーン設定", use_container_width=True)
 
