@@ -1308,10 +1308,40 @@ class Repository:
         admin_name: str,
         admin_namespace: str,
         note: str = "",
-    ) -> None:
-        """Write USDC transaction history rows (from OCR) to USDC_History sheet."""
+    ) -> Tuple[int, int]:
+        """Write USDC transaction history rows (from OCR) to USDC_History sheet.
+
+        Skips rows that already exist (duplicate = same Project_Name + USDC_Date + USDC_Time + Amount).
+        Returns (written_count, skipped_count).
+        """
+        # Load existing rows to build duplicate key set
+        existing_keys: Set[Tuple[str, str, str, str]] = set()
+        try:
+            existing_df = self.gs.load_df("USDC_HISTORY")
+            if not existing_df.empty:
+                for _, ex in existing_df.iterrows():
+                    key = (
+                        str(ex.get("Project_Name", "")).strip(),
+                        str(ex.get("USDC_Date", "")).strip(),
+                        str(ex.get("USDC_Time", "")).strip(),
+                        str(ex.get("Amount", "")).strip(),
+                    )
+                    existing_keys.add(key)
+        except Exception:
+            pass  # シートが空 or 読み取りエラーは無視して全件書き込み
+
         recorded_at = U.fmt_dt(U.now_jst())
+        written, skipped = 0, 0
         for r in rows:
+            key = (
+                str(project).strip(),
+                str(r.get("date_str", "")).strip(),
+                str(r.get("time_str", "")).strip(),
+                str(float(r.get("amount", 0.0))).strip(),
+            )
+            if key in existing_keys:
+                skipped += 1
+                continue
             self.gs.append_row(
                 "USDC_HISTORY",
                 [
@@ -1326,6 +1356,9 @@ class Repository:
                     note or "",
                 ],
             )
+            existing_keys.add(key)  # 同一実行内の重複も防ぐ
+            written += 1
+        return written, skipped
 
     def active_projects(self, settings_df: pd.DataFrame) -> List[str]:
         if settings_df.empty:
@@ -2047,13 +2080,18 @@ class AppUI:
                                 use_container_width=True,
                             ):
                                 try:
-                                    self.repo.append_usdc_history_rows(
+                                    written, skipped = self.repo.append_usdc_history_rows(
                                         rows=usdc_rows,
                                         project=str(project),
                                         admin_name=AdminAuth.current_label(),
                                         admin_namespace=AdminAuth.current_namespace(),
                                     )
-                                    st.success(f"✅ {len(usdc_rows)} 件を USDC_History シートに保存しました。")
+                                    if written > 0 and skipped == 0:
+                                        st.success(f"✅ {written} 件を USDC_History シートに保存しました。")
+                                    elif written > 0:
+                                        st.success(f"✅ {written} 件保存しました（{skipped} 件は重複のためスキップ）。")
+                                    else:
+                                        st.info(f"ℹ️ 全 {skipped} 件は既にシートに存在するためスキップしました。")
                                 except Exception as _e:
                                     st.error(f"保存エラー: {_e}")
 
