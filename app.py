@@ -857,6 +857,7 @@ class SheetNames:
     LINEUSERS: str
     APR_SUMMARY: str
     SMARTVAULT_HISTORY: str
+    USDC_HISTORY: str
 
 
 class GSheetService:
@@ -870,6 +871,7 @@ class GSheetService:
             LINEUSERS=U.sheet_name(AppConfig.SHEET["LINEUSERS"], namespace),
             APR_SUMMARY=U.sheet_name(AppConfig.SHEET["APR_SUMMARY"], namespace),
             SMARTVAULT_HISTORY=U.sheet_name(AppConfig.SHEET["SMARTVAULT_HISTORY"], namespace),
+            USDC_HISTORY=U.sheet_name(AppConfig.SHEET["USDC_HISTORY"], namespace),
         )
 
         con = st.secrets.get("connections", {}).get("gsheets", {})
