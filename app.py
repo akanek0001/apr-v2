@@ -2751,21 +2751,25 @@ Settings シートの不足列補完、PERSONAL行の不足補完、OCR初期座
             row_setting = settings_df[settings_df["Project_Name"] == ocr_project].iloc[0]
 
             st.markdown("#### 現在値")
-            current_vals = pd.DataFrame(
-                [
-                    {
-                        "Crop_Left_Ratio_PC": row_setting.get("Crop_Left_Ratio_PC", AppConfig.OCR_DEFAULTS_PC["Crop_Left_Ratio_PC"]),
-                        "Crop_Top_Ratio_PC": row_setting.get("Crop_Top_Ratio_PC", AppConfig.OCR_DEFAULTS_PC["Crop_Top_Ratio_PC"]),
-                        "Crop_Right_Ratio_PC": row_setting.get("Crop_Right_Ratio_PC", AppConfig.OCR_DEFAULTS_PC["Crop_Right_Ratio_PC"]),
-                        "Crop_Bottom_Ratio_PC": row_setting.get("Crop_Bottom_Ratio_PC", AppConfig.OCR_DEFAULTS_PC["Crop_Bottom_Ratio_PC"]),
-                        "Crop_Left_Ratio_Mobile": row_setting.get("Crop_Left_Ratio_Mobile", AppConfig.OCR_DEFAULTS_MOBILE["Crop_Left_Ratio_Mobile"]),
-                        "Crop_Top_Ratio_Mobile": row_setting.get("Crop_Top_Ratio_Mobile", AppConfig.OCR_DEFAULTS_MOBILE["Crop_Top_Ratio_Mobile"]),
-                        "Crop_Right_Ratio_Mobile": row_setting.get("Crop_Right_Ratio_Mobile", AppConfig.OCR_DEFAULTS_MOBILE["Crop_Right_Ratio_Mobile"]),
-                        "Crop_Bottom_Ratio_Mobile": row_setting.get("Crop_Bottom_Ratio_Mobile", AppConfig.OCR_DEFAULTS_MOBILE["Crop_Bottom_Ratio_Mobile"]),
-                    }
-                ]
-            )
-            st.dataframe(current_vals, use_container_width=True, hide_index=True)
+            _all_defaults = {
+                **AppConfig.OCR_DEFAULTS_PC,
+                **AppConfig.OCR_DEFAULTS_MOBILE,
+                **AppConfig.SV_BOX_DEFAULTS,
+                **AppConfig.PC_BOX_DEFAULTS,
+            }
+            _cv_rows = []
+            for _zone, _keys in [
+                ("🖥️ PC APR",          ["Crop_Left_Ratio_PC", "Crop_Top_Ratio_PC", "Crop_Right_Ratio_PC", "Crop_Bottom_Ratio_PC"]),
+                ("🖥️ PC 流動性",       ["PC_Liq_Left", "PC_Liq_Top", "PC_Liq_Right", "PC_Liq_Bottom"]),
+                ("🖥️ PC 昨日の収益",   ["PC_Profit_Left", "PC_Profit_Top", "PC_Profit_Right", "PC_Profit_Bottom"]),
+                ("📱 Mobile APR補助",  ["Crop_Left_Ratio_Mobile", "Crop_Top_Ratio_Mobile", "Crop_Right_Ratio_Mobile", "Crop_Bottom_Ratio_Mobile"]),
+                ("📱 SV 流動性",       ["SV_Liq_Left", "SV_Liq_Top", "SV_Liq_Right", "SV_Liq_Bottom"]),
+                ("📱 SV 昨日の収益",   ["SV_Profit_Left", "SV_Profit_Top", "SV_Profit_Right", "SV_Profit_Bottom"]),
+                ("📱 SV APR",         ["SV_APR_Left", "SV_APR_Top", "SV_APR_Right", "SV_APR_Bottom"]),
+            ]:
+                vals = [float(row_setting.get(k, _all_defaults.get(k, 0))) for k in _keys]
+                _cv_rows.append({"ゾーン": _zone, "Left": vals[0], "Top": vals[1], "Right": vals[2], "Bottom": vals[3]})
+            st.dataframe(pd.DataFrame(_cv_rows), use_container_width=True, hide_index=True)
 
             st.markdown("#### 座標入力")
             sv_d = AppConfig.SV_BOX_DEFAULTS
