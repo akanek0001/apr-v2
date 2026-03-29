@@ -522,6 +522,80 @@ class U:
         return min(candidates)
 
     @staticmethod
+    def extract_transaction_rows(text: str) -> List[Dict[str, Any]]:
+        """Extract (datetime, date_str, time_str, amount) rows from a USDC transaction
+        history OCR text.
+
+        Expected OCR line format (Japanese wallet app):
+          "3月 29 at 10:44 am"  followed somewhere by  "$28.19"
+        """
+        if not text:
+            return []
+
+        # Normalise common OCR mis-reads
+        norm = text
+        for k, v in {"O": "0", "o": "0", "l": "1", "I": "1", "S": "5", "s": "5"}.items():
+            # Only replace in digit contexts to avoid mangling Japanese characters
+            pass
+        norm = re.sub(r"[ \t\u3000]+", " ", norm)
+
+        # Pattern: <月数>月 <日> at <HH>:<MM> <am|pm>
+        date_pat = re.compile(
+            r"(\d{1,2})月\s*(\d{1,2})\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)", re.IGNORECASE
+        )
+        # Pattern: $<amount>
+        amount_pat = re.compile(r"\$\s*(\d[\d,]*(?:\.\d+)?)")
+
+        date_matches = list(date_pat.finditer(norm))
+        rows: List[Dict[str, Any]] = []
+
+        for i, dm in enumerate(date_matches):
+            # Extract text chunk from this date to the next
+            start = dm.start()
+            end = date_matches[i + 1].start() if i + 1 < len(date_matches) else len(norm)
+            chunk = norm[start:end]
+
+            month = int(dm.group(1))
+            day = int(dm.group(2))
+            time_str = dm.group(3)
+            ampm = dm.group(4).lower()
+
+            # Convert to 24-hour
+            hour, minute = (int(p) for p in time_str.split(":"))
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+
+            # Best-guess year = current JST year
+            try:
+                year = U.now_jst().year
+                dt = datetime(year, month, day, hour, minute, tzinfo=AppConfig.JST)
+            except ValueError:
+                dt = None
+
+            # Dollar amounts in this chunk — take the first (typically the primary amount)
+            amounts_found = amount_pat.findall(chunk)
+            amount: Optional[float] = None
+            if amounts_found:
+                try:
+                    amount = float(amounts_found[0].replace(",", ""))
+                except ValueError:
+                    pass
+
+            rows.append(
+                {
+                    "datetime": dt,
+                    "date_str": f"{month}月{day}日",
+                    "time_str": f"{time_str} {ampm}",
+                    "datetime_jst": U.fmt_dt(dt) if dt else "",
+                    "amount": amount,
+                }
+            )
+
+        return rows
+
+    @staticmethod
     def draw_ocr_boxes(file_bytes: bytes, boxes: Dict[str, Dict[str, float]]) -> bytes:
         try:
             img = Image.open(BytesIO(file_bytes)).convert("RGB")
@@ -1632,6 +1706,17 @@ class AppUI:
             "boxed_preview": boxed_preview,
         }
 
+    def _ocr_usdc_history(self, file_bytes: bytes) -> Dict[str, Any]:
+        """OCR a full USDC transaction history screenshot and return all extracted rows.
+
+        The entire image is sent to OCR (no crop) because the transaction list spans
+        the full height of the screen.  Each row yields date, time, and USD amount.
+        """
+        full_box = {"left": 0.0, "top": 0.05, "right": 1.0, "bottom": 0.98}
+        raw_text = self._ocr_crop_text(file_bytes, full_box)
+        rows = U.extract_transaction_rows(raw_text)
+        return {"raw_text": raw_text, "rows": rows}
+
     def render_dashboard(self, members_df: pd.DataFrame, ledger_df: pd.DataFrame, apr_summary_df: pd.DataFrame) -> None:
         st.subheader("📊 管理画面ダッシュボード")
         st.caption("総資産 / 本日APR / グループ別残高 / 個人残高 / 個人別累計APR / LINE通知履歴")
@@ -2134,6 +2219,42 @@ class AppUI:
             st.warning("有効なプロジェクトがありません。")
             return
 
+        # ── USDC Transaction History OCR ──────────────────────────────────────
+        with st.expander("📱 USDCトランザクション履歴 OCR読み取り（スマートフォン画面）", expanded=False):
+            st.caption("Coinbase等のUSDC受け取り履歴画面をアップロードすると、日付・時刻・金額を自動で一覧抽出します。")
+            hist_img = st.file_uploader(
+                "USDC履歴画像をアップロード",
+                type=["png", "jpg", "jpeg"],
+                key="cash_usdc_hist",
+            )
+            if hist_img is not None and st.button("OCR読み取り開始", key="cash_usdc_ocr_btn"):
+                with st.spinner("OCR実行中..."):
+                    hist_result = self._ocr_usdc_history(hist_img.getvalue())
+
+                st.markdown("#### 抽出結果")
+                rows = hist_result["rows"]
+                if rows:
+                    df_rows = pd.DataFrame(
+                        [
+                            {
+                                "日時(JST)": r["datetime_jst"],
+                                "日付": r["date_str"],
+                                "時刻": r["time_str"],
+                                "金額($)": r["amount"] if r["amount"] is not None else "未検出",
+                            }
+                            for r in rows
+                        ]
+                    )
+                    st.dataframe(df_rows, use_container_width=True, hide_index=True)
+                    total = sum(r["amount"] for r in rows if r["amount"] is not None)
+                    st.success(f"合計 {len(rows)} 件 / 合計金額: {U.fmt_usd(total)}")
+                else:
+                    st.warning("トランザクション行が検出されませんでした。画像を確認してください。")
+                    with st.expander("OCR生テキスト", expanded=True):
+                        st.text(hist_result["raw_text"] or "（テキスト取得なし）")
+
+        st.divider()
+        # ── Manual cash entry ─────────────────────────────────────────────────
         project = st.selectbox("プロジェクト", projects, key="cash_project")
         mem = self.repo.project_members_active(members_df, project)
         if mem.empty:
