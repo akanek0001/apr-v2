@@ -1848,7 +1848,19 @@ class AppUI:
 
         uploaded = st.file_uploader("エビデンス画像（任意）", type=["png", "jpg", "jpeg"], key="apr_img")
 
-        if uploaded is not None and st.button("OCRで別取得"):
+        # Auto-run OCR when a new image is uploaded (detect change via file hash)
+        _should_ocr = False
+        if uploaded is not None:
+            import hashlib
+            _img_hash = hashlib.md5(uploaded.getvalue()).hexdigest()
+            if st.session_state.get("_apr_img_last_hash") != _img_hash:
+                st.session_state["_apr_img_last_hash"] = _img_hash
+                _should_ocr = True
+            # Also allow manual re-run
+            if st.button("🔄 OCR再実行", key="apr_ocr_rerun"):
+                _should_ocr = True
+
+        if _should_ocr:
             file_bytes = uploaded.getvalue()
             is_mobile = U.is_mobile_tall_image(file_bytes)
 
