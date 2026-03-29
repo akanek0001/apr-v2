@@ -1968,15 +1968,55 @@ class AppUI:
                 # Values stored → rerun so the text inputs and summary at the top refresh
                 st.rerun()
             else:
-                # Nothing detected → show guidance instead of silently showing 0
-                st.error(
-                    "⚠️ OCRで数値を検出できませんでした。\n\n"
-                    "**考えられる原因と対処法:**\n"
-                    "1. 赤枠の位置がずれている → ❓ ヘルプ ページの「OCR設定（座標設定）」で座標を調整してください。\n"
-                    "2. 画像が低解像度または小さすぎる → 元のスクリーンショットを使用してください。\n"
-                    "3. 数値が画面に表示されていない → 正しいページのスクショか確認してください。\n\n"
-                    "値が読み取れない場合は上の入力欄に手動で入力してください。"
-                )
+                # ── USDC取引履歴フォールバック（モバイルかつ全値None のとき） ──
+                if is_mobile:
+                    with st.spinner("USDC取引履歴として再読み取り中..."):
+                        usdc_result = self._ocr_usdc_history(file_bytes)
+                        usdc_rows = usdc_result.get("rows", [])
+                    if usdc_rows:
+                        st.info(
+                            f"📋 SmartVaultサマリーではなく **USDC取引履歴** を検出しました（{len(usdc_rows)} 件）。\n\n"
+                            "合計金額を「昨日の収益」として設定できます。"
+                        )
+                        total_amount = sum(r["amount"] for r in usdc_rows)
+                        rows_df = pd.DataFrame([
+                            {
+                                "日付":   r["date_str"],
+                                "時刻":   r["time_str"],
+                                "金額($)": r["amount"],
+                            }
+                            for r in usdc_rows
+                        ])
+                        st.dataframe(rows_df, use_container_width=True, hide_index=True)
+                        st.markdown(f"**合計: {U.fmt_usd(total_amount)}**")
+                        if st.button(
+                            f"💰 昨日の収益 = {U.fmt_usd(total_amount)} として設定",
+                            key="usdc_set_profit_apr",
+                        ):
+                            st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
+                            st.session_state["ocr_yesterday_profit"] = total_amount
+                            st.rerun()
+                        with st.expander("OCR生テキスト（USDC履歴）", expanded=False):
+                            st.text(usdc_result.get("raw_text") or "（テキスト取得なし）")
+                    else:
+                        st.error(
+                            "⚠️ OCRで数値を検出できませんでした（SmartVault / USDC取引履歴ともに未検出）。\n\n"
+                            "**考えられる原因と対処法:**\n"
+                            "1. 赤枠の位置がずれている → ❓ ヘルプ ページの「OCR設定（座標設定）」で座標を調整してください。\n"
+                            "2. 画像が低解像度または小さすぎる → 元のスクリーンショットを使用してください。\n"
+                            "3. 数値が画面に表示されていない → 正しいページのスクショか確認してください。\n\n"
+                            "値が読み取れない場合は上の入力欄に手動で入力してください。"
+                        )
+                else:
+                    # PC画像で未検出
+                    st.error(
+                        "⚠️ OCRで数値を検出できませんでした。\n\n"
+                        "**考えられる原因と対処法:**\n"
+                        "1. 赤枠の位置がずれている → ❓ ヘルプ ページの「OCR設定（座標設定）」で座標を調整してください。\n"
+                        "2. 画像が低解像度または小さすぎる → 元のスクリーンショットを使用してください。\n"
+                        "3. 数値が画面に表示されていない → 正しいページのスクショか確認してください。\n\n"
+                        "値が読み取れない場合は上の入力欄に手動で入力してください。"
+                    )
 
         target_projects = projects if send_scope == "全有効プロジェクト" else [project]
         today_key = U.fmt_date(U.now_jst())
