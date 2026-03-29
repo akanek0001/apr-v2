@@ -1887,107 +1887,96 @@ class AppUI:
                 pass
 
             img_type_label = "📱 モバイル" if is_mobile else "🖥️ PC"
-            st.info(f"画像タイプ判定: {img_type_label} / APR切り抜き範囲: left={crop_left_ratio:.3f}, top={crop_top_ratio:.3f}, right={crop_right_ratio:.3f}, bottom={crop_bottom_ratio:.3f}")
+            st.caption(f"🔍 OCR実行中… 画像タイプ: {img_type_label}")
 
-            if is_mobile:
-                # ── Mobile: SmartVault 3-zone OCR ──
-                smart = self._ocr_smartvault_mobile_metrics(file_bytes, srow=srow_obj)
+            _ocr_got_any = False  # Track if at least one value was detected
 
-                st.markdown("#### 📱 SmartVaultモバイル専用OCR結果")
-                st.image(smart["boxed_preview"], caption="赤枠 = OCR対象範囲", use_container_width=True)
+            with st.spinner("OCR処理中... しばらくお待ちください"):
+                if is_mobile:
+                    result = self._ocr_smartvault_mobile_metrics(file_bytes, srow=srow_obj)
+                    liq_val    = result["total_liquidity"]
+                    profit_val = result["yesterday_profit"]
+                    apr_val    = result["apr_value"]
+                    boxes      = result["boxes"]
+                    texts      = {
+                        "流動性":     result["total_text"],
+                        "昨日の収益": result["profit_text"],
+                        "APR":       result["apr_text"],
+                    }
+                else:
+                    result = self._ocr_pc_metrics(
+                        file_bytes,
+                        crop_left_ratio, crop_top_ratio, crop_right_ratio, crop_bottom_ratio,
+                        srow=srow_obj,
+                    )
+                    liq_val    = result["total_liquidity"]
+                    profit_val = result["yesterday_profit"]
+                    apr_val    = result["apr_value"]
+                    boxes      = result["boxes"]
+                    texts      = {
+                        "流動性":     result["liq_text"],
+                        "昨日の収益": result["profit_text"],
+                        "APR":       result["apr_text"],
+                    }
 
-                c_a, c_b, c_c = st.columns(3)
-                with c_a:
-                    if smart["total_liquidity"] is not None:
-                        st.success(f"流動性: {U.fmt_usd(float(smart['total_liquidity']))}")
-                    else:
-                        st.warning("流動性: 未検出")
-                with c_b:
-                    if smart["yesterday_profit"] is not None:
-                        st.success(f"昨日の収益: {U.fmt_usd(float(smart['yesterday_profit']))}")
-                    else:
-                        st.warning("昨日の収益: 未検出")
-                with c_c:
-                    if smart["apr_value"] is not None:
-                        st.success(f"APR: {float(smart['apr_value']):.2f}%")
-                    else:
-                        st.warning("APR: 未検出")
+            # ── Show preview and results ──
+            label_prefix = "📱 SmartVaultモバイル" if is_mobile else "🖥️ PC"
+            st.markdown(f"#### {label_prefix} OCR結果")
+            st.image(result["boxed_preview"], caption="赤枠 = OCR対象範囲", use_container_width=True)
 
-                b = smart["boxes"]
-                st.caption(f"流動性範囲 {b['TOTAL_LIQUIDITY']['left']:.3f},{b['TOTAL_LIQUIDITY']['top']:.3f},{b['TOTAL_LIQUIDITY']['right']:.3f},{b['TOTAL_LIQUIDITY']['bottom']:.3f}")
-                st.caption(f"昨日の収益範囲 {b['YESTERDAY_PROFIT']['left']:.3f},{b['YESTERDAY_PROFIT']['top']:.3f},{b['YESTERDAY_PROFIT']['right']:.3f},{b['YESTERDAY_PROFIT']['bottom']:.3f}")
-                st.caption(f"APR範囲 {b['APR']['left']:.3f},{b['APR']['top']:.3f},{b['APR']['right']:.3f},{b['APR']['bottom']:.3f}")
+            c_a, c_b, c_c = st.columns(3)
+            with c_a:
+                if liq_val is not None:
+                    st.success(f"流動性: {U.fmt_usd(float(liq_val))}")
+                else:
+                    st.warning("流動性: 未検出")
+            with c_b:
+                if profit_val is not None:
+                    st.success(f"昨日の収益: {U.fmt_usd(float(profit_val))}")
+                else:
+                    st.warning("昨日の収益: 未検出")
+            with c_c:
+                if apr_val is not None:
+                    st.success(f"APR: {float(apr_val):.4f}%")
+                else:
+                    st.warning("APR: 未検出")
 
-                with st.expander("OCR生テキスト（流動性）", expanded=False):
-                    st.text(smart["total_text"] or "")
-                with st.expander("OCR生テキスト（昨日の収益）", expanded=False):
-                    st.text(smart["profit_text"] or "")
-                with st.expander("OCR生テキスト（APR）", expanded=False):
-                    st.text(smart["apr_text"] or "")
+            b = boxes
+            st.caption(f"流動性範囲 {b['TOTAL_LIQUIDITY']['left']:.3f},{b['TOTAL_LIQUIDITY']['top']:.3f},{b['TOTAL_LIQUIDITY']['right']:.3f},{b['TOTAL_LIQUIDITY']['bottom']:.3f}")
+            st.caption(f"昨日の収益範囲 {b['YESTERDAY_PROFIT']['left']:.3f},{b['YESTERDAY_PROFIT']['top']:.3f},{b['YESTERDAY_PROFIT']['right']:.3f},{b['YESTERDAY_PROFIT']['bottom']:.3f}")
+            st.caption(f"APR範囲 {b['APR']['left']:.3f},{b['APR']['top']:.3f},{b['APR']['right']:.3f},{b['APR']['bottom']:.3f}")
 
-                if smart["total_liquidity"] is not None:
-                    st.session_state["sv_total_liquidity"] = f"{float(smart['total_liquidity']):,.2f}"
-                    st.session_state["ocr_total_liquidity"] = float(smart["total_liquidity"])
-                if smart["yesterday_profit"] is not None:
-                    st.session_state["sv_yesterday_profit"] = f"{float(smart['yesterday_profit']):,.2f}"
-                    st.session_state["ocr_yesterday_profit"] = float(smart["yesterday_profit"])
-                if smart["apr_value"] is not None:
-                    st.session_state["sv_apr"] = f"{float(smart['apr_value']):.4f}"
-                    st.session_state["ocr_apr"] = float(smart["apr_value"])
+            for label, txt in texts.items():
+                with st.expander(f"OCR生テキスト（{label}）", expanded=False):
+                    st.text(txt or "（テキスト取得なし）")
 
+            # ── Store detected values into session_state ──
+            if liq_val is not None:
+                st.session_state["sv_total_liquidity"] = f"{float(liq_val):,.2f}"
+                st.session_state["ocr_total_liquidity"] = float(liq_val)
+                _ocr_got_any = True
+            if profit_val is not None:
+                st.session_state["sv_yesterday_profit"] = f"{float(profit_val):,.2f}"
+                st.session_state["ocr_yesterday_profit"] = float(profit_val)
+                _ocr_got_any = True
+            if apr_val is not None:
+                st.session_state["sv_apr"] = f"{float(apr_val):.4f}"
+                st.session_state["ocr_apr"] = float(apr_val)
+                _ocr_got_any = True
+
+            if _ocr_got_any:
+                # Values stored → rerun so the text inputs and summary at the top refresh
                 st.rerun()
-
             else:
-                # ── PC: 3-zone OCR (liquidity / profit / APR) ──
-                pc = self._ocr_pc_metrics(
-                    file_bytes,
-                    crop_left_ratio, crop_top_ratio, crop_right_ratio, crop_bottom_ratio,
-                    srow=srow_obj,
+                # Nothing detected → show guidance instead of silently showing 0
+                st.error(
+                    "⚠️ OCRで数値を検出できませんでした。\n\n"
+                    "**考えられる原因と対処法:**\n"
+                    "1. 赤枠の位置がずれている → ❓ ヘルプ ページの「OCR設定（座標設定）」で座標を調整してください。\n"
+                    "2. 画像が低解像度または小さすぎる → 元のスクリーンショットを使用してください。\n"
+                    "3. 数値が画面に表示されていない → 正しいページのスクショか確認してください。\n\n"
+                    "値が読み取れない場合は上の入力欄に手動で入力してください。"
                 )
-
-                st.markdown("#### 🖥️ PC 3ゾーンOCR結果")
-                st.image(pc["boxed_preview"], caption="赤枠 = OCR対象範囲", use_container_width=True)
-
-                c_a, c_b, c_c = st.columns(3)
-                with c_a:
-                    if pc["total_liquidity"] is not None:
-                        st.success(f"流動性: {U.fmt_usd(float(pc['total_liquidity']))}")
-                    else:
-                        st.warning("流動性: 未検出")
-                with c_b:
-                    if pc["yesterday_profit"] is not None:
-                        st.success(f"昨日の収益: {U.fmt_usd(float(pc['yesterday_profit']))}")
-                    else:
-                        st.warning("昨日の収益: 未検出")
-                with c_c:
-                    if pc["apr_value"] is not None:
-                        st.success(f"APR: {float(pc['apr_value']):.2f}%")
-                    else:
-                        st.warning("APR: 未検出")
-
-                b = pc["boxes"]
-                st.caption(f"流動性範囲 {b['TOTAL_LIQUIDITY']['left']:.3f},{b['TOTAL_LIQUIDITY']['top']:.3f},{b['TOTAL_LIQUIDITY']['right']:.3f},{b['TOTAL_LIQUIDITY']['bottom']:.3f}")
-                st.caption(f"昨日の収益範囲 {b['YESTERDAY_PROFIT']['left']:.3f},{b['YESTERDAY_PROFIT']['top']:.3f},{b['YESTERDAY_PROFIT']['right']:.3f},{b['YESTERDAY_PROFIT']['bottom']:.3f}")
-                st.caption(f"APR範囲 {b['APR']['left']:.3f},{b['APR']['top']:.3f},{b['APR']['right']:.3f},{b['APR']['bottom']:.3f}")
-
-                with st.expander("OCR生テキスト（流動性）", expanded=False):
-                    st.text(pc["liq_text"] or "")
-                with st.expander("OCR生テキスト（昨日の収益）", expanded=False):
-                    st.text(pc["profit_text"] or "")
-                with st.expander("OCR生テキスト（APR）", expanded=False):
-                    st.text(pc["apr_text"] or "")
-
-                if pc["total_liquidity"] is not None:
-                    st.session_state["sv_total_liquidity"] = f"{float(pc['total_liquidity']):,.2f}"
-                    st.session_state["ocr_total_liquidity"] = float(pc["total_liquidity"])
-                if pc["yesterday_profit"] is not None:
-                    st.session_state["sv_yesterday_profit"] = f"{float(pc['yesterday_profit']):,.2f}"
-                    st.session_state["ocr_yesterday_profit"] = float(pc["yesterday_profit"])
-                if pc["apr_value"] is not None:
-                    st.session_state["sv_apr"] = f"{float(pc['apr_value']):.4f}"
-                    st.session_state["ocr_apr"] = float(pc["apr_value"])
-
-                st.rerun()
 
         target_projects = projects if send_scope == "全有効プロジェクト" else [project]
         today_key = U.fmt_date(U.now_jst())
