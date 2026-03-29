@@ -2014,13 +2014,23 @@ class AppUI:
                 else:
                     st.warning("APR: 未検出")
 
+            # ── 使用座標を表で表示 ──
             b = boxes
-            st.caption(f"流動性範囲 {b['TOTAL_LIQUIDITY']['left']:.3f},{b['TOTAL_LIQUIDITY']['top']:.3f},{b['TOTAL_LIQUIDITY']['right']:.3f},{b['TOTAL_LIQUIDITY']['bottom']:.3f}")
-            st.caption(f"昨日の収益範囲 {b['YESTERDAY_PROFIT']['left']:.3f},{b['YESTERDAY_PROFIT']['top']:.3f},{b['YESTERDAY_PROFIT']['right']:.3f},{b['YESTERDAY_PROFIT']['bottom']:.3f}")
-            st.caption(f"APR範囲 {b['APR']['left']:.3f},{b['APR']['top']:.3f},{b['APR']['right']:.3f},{b['APR']['bottom']:.3f}")
+            _all_none = liq_val is None and profit_val is None and apr_val is None
+            with st.expander("使用中のOCR座標", expanded=_all_none):
+                st.dataframe(
+                    pd.DataFrame([
+                        {"ゾーン": "流動性",     "Left": b["TOTAL_LIQUIDITY"]["left"],  "Top": b["TOTAL_LIQUIDITY"]["top"],  "Right": b["TOTAL_LIQUIDITY"]["right"],  "Bottom": b["TOTAL_LIQUIDITY"]["bottom"]},
+                        {"ゾーン": "昨日の収益", "Left": b["YESTERDAY_PROFIT"]["left"], "Top": b["YESTERDAY_PROFIT"]["top"], "Right": b["YESTERDAY_PROFIT"]["right"], "Bottom": b["YESTERDAY_PROFIT"]["bottom"]},
+                        {"ゾーン": "APR",        "Left": b["APR"]["left"],              "Top": b["APR"]["top"],              "Right": b["APR"]["right"],              "Bottom": b["APR"]["bottom"]},
+                    ]),
+                    hide_index=True,
+                    use_container_width=True,
+                )
 
+            # ── OCR生テキスト（全未検出時は自動展開） ──
             for label, txt in texts.items():
-                with st.expander(f"OCR生テキスト（{label}）", expanded=False):
+                with st.expander(f"OCR生テキスト（{label}）", expanded=_all_none):
                     st.text(txt or "（テキスト取得なし）")
 
             # ── Store detected values into session_state ──
