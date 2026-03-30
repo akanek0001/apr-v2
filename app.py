@@ -792,7 +792,9 @@ class ExternalService:
         crop_right_ratio: float,
         crop_bottom_ratio: float,
         language: str = "eng",
+        fast: bool = False,
     ) -> str:
+        """fast=True のとき engine=1 のみ・前処理なしで呼び出す（USDC全画面OCR用）。"""
         # ── API キー取得 ──
         try:
             api_key = st.secrets["ocrspace"]["api_key"]
@@ -860,20 +862,27 @@ class ExternalService:
                 bottom_ratio=crop_bottom_ratio,
             )
 
-            # ── 高速化: まず元画像×エンジン2→1を試し、取れたら即返す ──
-            for engine in (2, 1):
-                txt = _call_ocr("cropped.png", cropped_bytes, engine)
+            if fast:
+                # ── 高速モード: engine=1 のみ・前処理なし（USDC全画面OCR用）──
+                # API呼び出し: jpn=1回 + engフォールバック=1回 = 最大2回
+                txt = _call_ocr("cropped.png", cropped_bytes, 1)
                 if txt:
                     return txt
-
-            # ── フォールバック: 前処理バリアント1枚のみ追加試行 ──
-            processed_list = U.preprocess_ocr_image(cropped_bytes)
-            if processed_list:
-                fallback_bytes = processed_list[0]
+            else:
+                # ── 通常モード: まず元画像×エンジン2→1を試し、取れたら即返す ──
                 for engine in (2, 1):
-                    txt = _call_ocr("processed_0.png", fallback_bytes, engine)
+                    txt = _call_ocr("cropped.png", cropped_bytes, engine)
                     if txt:
                         return txt
+
+                # ── フォールバック: 前処理バリアント1枚のみ追加試行 ──
+                processed_list = U.preprocess_ocr_image(cropped_bytes)
+                if processed_list:
+                    fallback_bytes = processed_list[0]
+                    for engine in (2, 1):
+                        txt = _call_ocr("processed_0.png", fallback_bytes, engine)
+                        if txt:
+                            return txt
 
             # テキストが取れなかった場合はAPIエラーを返す
             if api_errors:
@@ -1643,7 +1652,7 @@ class AppUI:
         self.engine = engine
         self.store = store
 
-    def _ocr_crop_text(self, file_bytes: bytes, box: Dict[str, float], language: str = "eng") -> str:
+    def _ocr_crop_text(self, file_bytes: bytes, box: Dict[str, float], language: str = "eng", fast: bool = False) -> str:
         return ExternalService.ocr_space_extract_text_with_crop(
             file_bytes=file_bytes,
             crop_left_ratio=box["left"],
@@ -1651,6 +1660,7 @@ class AppUI:
             crop_right_ratio=box["right"],
             crop_bottom_ratio=box["bottom"],
             language=language,
+            fast=fast,
         )
 
     @staticmethod
@@ -1835,13 +1845,13 @@ class AppUI:
         """
         full_box = {"left": 0.0, "top": 0.05, "right": 1.0, "bottom": 0.98}
 
-        # First try: Japanese OCR (reads 月 correctly)
-        raw_text = self._ocr_crop_text(file_bytes, full_box, language="jpn")
+        # First try: Japanese OCR (reads 月 correctly) — fast=True で1APIコール
+        raw_text = self._ocr_crop_text(file_bytes, full_box, language="jpn", fast=True)
         rows = U.extract_transaction_rows(raw_text)
 
-        # Fallback: English OCR (regex tolerates missing 月)
+        # Fallback: English OCR (regex tolerates missing 月) — fast=True で1APIコール
         if not rows:
-            raw_text_eng = self._ocr_crop_text(file_bytes, full_box, language="eng")
+            raw_text_eng = self._ocr_crop_text(file_bytes, full_box, language="eng", fast=True)
             rows = U.extract_transaction_rows(raw_text_eng)
             if rows:
                 raw_text = raw_text_eng
