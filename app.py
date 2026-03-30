@@ -1907,21 +1907,21 @@ class AppUI:
             total_liquidity_raw = st.text_input(
                 "流動性（手動設定可）",
                 value=st.session_state.get("sv_total_liquidity", ""),
-                key="sv_total_liquidity",
+                key="input_sv_liq",
                 placeholder="$78,354.35",
             )
         with c2:
             yesterday_profit_raw = st.text_input(
                 "昨日の収益（手動設定可）",
                 value=st.session_state.get("sv_yesterday_profit", ""),
-                key="sv_yesterday_profit",
+                key="input_sv_profit",
                 placeholder="$90.87",
             )
         with c3:
             apr_raw = st.text_input(
                 "APR（%・手動設定可）",
                 value=st.session_state.get("sv_apr", ""),
-                key="sv_apr",
+                key="input_sv_apr",
                 placeholder="42.33",
             )
 
