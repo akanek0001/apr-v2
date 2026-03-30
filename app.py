@@ -2336,7 +2336,7 @@ class AppUI:
             st.write(f"apr={apr}, yesterday_profit={yesterday_profit}, total_liquidity={total_liquidity}")
             st.write(f"total_members={total_members}, skip={skipped_members}, target_projects={target_projects}")
             st.write(f"input_sv_apr={st.session_state.get('input_sv_apr','')}, input_sv_profit={st.session_state.get('input_sv_profit','')}")
-            st.write(f"Ledger sheet: {self.repo.gs.names.LEDGER}")
+            st.write(f"Ledger sheet: {self.repo.gs.names.LEDGER} / namespace: '{AdminAuth.current_namespace()}'")
 
         if st.button("APRを確定して対象全員にLINE送信", key="apr_confirm_btn"):
             _save_warnings: List[str] = []
