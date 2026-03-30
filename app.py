@@ -2153,12 +2153,26 @@ class AppUI:
                         st.markdown(f"**合計: {U.fmt_usd(total_amount)}**")
 
                         if st.button(
-                            f"💰 昨日の収益 = {U.fmt_usd(total_amount)} として設定",
+                            f"💰 昨日の収益 = {U.fmt_usd(total_amount)} として設定（APR自動計算）",
                             key="usdc_set_profit_apr",
                             use_container_width=True,
                         ):
                             st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
                             st.session_state["ocr_yesterday_profit"] = total_amount
+                            # APR% を自動計算: profit ÷ (total_principal × factor) × 365 × 100
+                            try:
+                                _srow = settings_df[settings_df["Project_Name"] == str(project)].iloc[0]
+                                _factor = float(_srow.get("Net_Factor", AppConfig.FACTOR["MASTER"]))
+                                if _factor <= 0:
+                                    _factor = float(AppConfig.FACTOR["MASTER"])
+                                _mem_active = self.repo.project_members_active(members_df, project)
+                                _total_principal = float(_mem_active["Principal"].sum()) if not _mem_active.empty else 0.0
+                                if _total_principal > 0 and _factor > 0:
+                                    _auto_apr = (total_amount / (_total_principal * _factor)) * 365.0 * 100.0
+                                    st.session_state["sv_apr"] = f"{_auto_apr:.4f}"
+                                    st.session_state["ocr_apr"] = _auto_apr
+                            except Exception:
+                                pass  # APR自動計算失敗時は手動入力にフォールバック
                             st.rerun()
 
                         with st.expander("OCR生テキスト（USDC履歴）", expanded=False):
