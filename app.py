@@ -2127,6 +2127,9 @@ class AppUI:
                             usdc_result = self._ocr_usdc_history(file_bytes)
                             usdc_rows = usdc_result.get("rows", [])
                     if usdc_rows:
+                        # amount が None の行（金額未取得）を除外
+                        usdc_rows = [r for r in usdc_rows if r.get("amount") is not None]
+                    if usdc_rows:
                         st.info(
                             f"📋 SmartVaultサマリーではなく **USDC取引履歴** を検出しました（{len(usdc_rows)} 件）。\n\n"
                             "合計金額を「昨日の収益」として設定できます。"
