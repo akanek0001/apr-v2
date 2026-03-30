@@ -798,8 +798,54 @@ class ExternalService:
         if not api_key or str(api_key).strip() in ("", "YOUR_API_KEY"):
             return "[OCRエラー] APIキーが空または未設定です。Streamlit SecretsにAPIキーを設定してください。"
 
-        texts: List[str] = []
         api_errors: List[str] = []
+
+        def _call_ocr(target_name: str, target_bytes: bytes, engine: int) -> str:
+            """1回のOCR APIコール。テキストを返す。失敗時は空文字。"""
+            try:
+                res = requests.post(
+                    "https://api.ocr.space/parse/image",
+                    files={"filename": (target_name, target_bytes)},
+                    data={
+                        "apikey": str(api_key).strip(),
+                        "language": "eng",
+                        "isOverlayRequired": False,
+                        "OCREngine": engine,
+                        "scale": True,
+                        "detectOrientation": True,
+                        "isTable": False,
+                    },
+                    timeout=30,
+                )
+                # JSON以外のレスポンス（プレーンテキストエラーなど）に対応
+                try:
+                    data = res.json()
+                except Exception:
+                    raw = res.text[:300] if res.text else f"HTTP {res.status_code}"
+                    api_errors.append(f"非JSONレスポンス(engine={engine}): {raw}")
+                    return ""
+
+                if not isinstance(data, dict):
+                    api_errors.append(f"予期しないレスポンス形式(engine={engine}): {str(data)[:200]}")
+                    return ""
+
+                if data.get("IsErroredOnProcessing"):
+                    err_msgs = data.get("ErrorMessage", [])
+                    msg = " | ".join(err_msgs) if isinstance(err_msgs, list) else str(err_msgs)
+                    api_errors.append(f"APIエラー(engine={engine}): {msg}")
+                    return ""
+
+                parts = []
+                for p in data.get("ParsedResults") or []:
+                    if isinstance(p, dict):
+                        txt = str(p.get("ParsedText", "")).strip()
+                        if txt:
+                            parts.append(txt)
+                return "\n".join(parts)
+
+            except Exception as req_e:
+                api_errors.append(f"リクエストエラー(engine={engine}): {req_e}")
+                return ""
 
         try:
             cropped_bytes = U.crop_image_by_ratio(
@@ -810,57 +856,27 @@ class ExternalService:
                 bottom_ratio=crop_bottom_ratio,
             )
 
+            # ── 高速化: まず元画像×エンジン2→1を試し、取れたら即返す ──
+            for engine in (2, 1):
+                txt = _call_ocr("cropped.png", cropped_bytes, engine)
+                if txt:
+                    return txt
+
+            # ── フォールバック: 前処理バリアント1枚のみ追加試行 ──
             processed_list = U.preprocess_ocr_image(cropped_bytes)
-            targets = [("cropped.png", cropped_bytes)] + [(f"processed_{i}.png", b) for i, b in enumerate(processed_list, start=1)]
-
-            for target_name, target_bytes in targets:
+            if processed_list:
+                fallback_bytes = processed_list[0]
                 for engine in (2, 1):
-                    try:
-                        res = requests.post(
-                            "https://api.ocr.space/parse/image",
-                            files={"filename": (target_name, target_bytes)},
-                            data={
-                                "apikey": api_key,
-                                "language": "eng",
-                                "isOverlayRequired": False,
-                                "OCREngine": engine,
-                                "scale": True,
-                                "detectOrientation": True,
-                                "isTable": False,
-                            },
-                            timeout=60,
-                        )
-                        data = res.json()
-                        # API側エラーを記録
-                        if data.get("IsErroredOnProcessing"):
-                            err_msgs = data.get("ErrorMessage", [])
-                            if isinstance(err_msgs, list):
-                                api_errors.extend(err_msgs)
-                            elif err_msgs:
-                                api_errors.append(str(err_msgs))
-                        for p in data.get("ParsedResults", []):
-                            txt = str(p.get("ParsedText", "")).strip()
-                            if txt:
-                                texts.append(txt)
-                    except Exception as req_e:
-                        api_errors.append(f"リクエストエラー(engine={engine}): {req_e}")
-                        continue
-
-            uniq, seen = [], set()
-            for t in texts:
-                key = t.strip()
-                if key and key not in seen:
-                    seen.add(key)
-                    uniq.append(key)
-
-            result = "\n\n".join(uniq)
+                    txt = _call_ocr("processed_0.png", fallback_bytes, engine)
+                    if txt:
+                        return txt
 
             # テキストが取れなかった場合はAPIエラーを返す
-            if not result and api_errors:
+            if api_errors:
                 unique_errs = list(dict.fromkeys(api_errors))
                 return "[OCRエラー] " + " / ".join(unique_errs)
 
-            return result
+            return ""
 
         except Exception as e:
             return f"[OCRエラー] 予期しないエラー: {e}"
