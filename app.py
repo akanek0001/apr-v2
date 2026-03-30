@@ -1936,6 +1936,13 @@ class AppUI:
             if _psrc in st.session_state:
                 st.session_state[_wkey] = st.session_state.pop(_psrc)
 
+        # rerun後も保存結果を表示する（st.rerun()でメッセージが消えるのを防ぐ）
+        if "_apr_save_success" in st.session_state:
+            st.success(st.session_state.pop("_apr_save_success"))
+            st.balloons()
+        if "_apr_save_error" in st.session_state:
+            st.error(st.session_state.pop("_apr_save_error"))
+
         projects = self.repo.active_projects(settings_df)
         if not projects:
             st.warning("有効（Active=TRUE）のプロジェクトがありません。")
@@ -2440,15 +2447,15 @@ class AppUI:
                     self.repo.write_members(members_df)
 
                 self.store.persist_and_refresh()
-                st.success(
-                    f"APR記録:{apr_ledger_count}件 / LINE履歴記録:{line_log_count}件 / "
+                st.session_state["_apr_save_success"] = (
+                    f"✅ APR記録:{apr_ledger_count}件 / LINE履歴記録:{line_log_count}件 / "
                     f"送信成功:{success} / 送信失敗:{fail} / 重複スキップ:{skip_count}件"
                 )
                 st.rerun()
 
             except Exception as e:
-                st.error(f"APR確定処理でエラー: {e}")
-                st.stop()
+                st.session_state["_apr_save_error"] = f"APR確定処理でエラー: {e}"
+                st.rerun()
 
         if send_scope == "選択中プロジェクトのみ":
             row = settings_df[settings_df["Project_Name"] == str(project)].iloc[0]
