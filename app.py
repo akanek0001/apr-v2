@@ -117,15 +117,17 @@ class AppConfig:
             "Note",
         ],
         "USDC_HISTORY": [
-            "Recorded_At_JST",
-            "Project_Name",
-            "USDC_Date",
-            "USDC_Time",
-            "USDC_Datetime_JST",
-            "Amount",
-            "Admin_Name",
-            "Admin_Namespace",
-            "Note",
+            "Unique_Key",
+            "Date_Label",
+            "Time_Label",
+            "Type_Label",
+            "Amount_USD",
+            "Token_Amount",
+            "Token_Symbol",
+            "Source_Image",
+            "Source_Project",
+            "OCR_Raw_Text",
+            "CreatedAt_JST",
         ],
     }
 
@@ -1350,7 +1352,7 @@ class Repository:
     ) -> Tuple[int, int]:
         """Write USDC transaction history rows (from OCR) to USDC_History sheet.
 
-        Skips rows that already exist (duplicate = same Project_Name + USDC_Date + USDC_Time + Amount).
+        Skips rows that already exist (duplicate = Source_Project + Date_Label + Time_Label + Amount_USD).
         Returns (written_count, skipped_count).
         """
         # Load existing rows to build duplicate key set
@@ -1360,39 +1362,45 @@ class Repository:
             if not existing_df.empty:
                 for _, ex in existing_df.iterrows():
                     key = (
-                        str(ex.get("Project_Name", "")).strip(),
-                        str(ex.get("USDC_Date", "")).strip(),
-                        str(ex.get("USDC_Time", "")).strip(),
-                        str(ex.get("Amount", "")).strip(),
+                        str(ex.get("Source_Project", "")).strip(),
+                        str(ex.get("Date_Label", "")).strip(),
+                        str(ex.get("Time_Label", "")).strip(),
+                        str(ex.get("Amount_USD", "")).strip(),
                     )
                     existing_keys.add(key)
         except Exception:
             pass  # シートが空 or 読み取りエラーは無視して全件書き込み
 
-        recorded_at = U.fmt_dt(U.now_jst())
+        created_at = U.fmt_dt(U.now_jst())
         written, skipped = 0, 0
         for r in rows:
+            date_label = str(r.get("date_str", "")).strip()
+            time_label = str(r.get("time_str", "")).strip()
+            amount_usd = float(r.get("amount", 0.0))
             key = (
                 str(project).strip(),
-                str(r.get("date_str", "")).strip(),
-                str(r.get("time_str", "")).strip(),
-                str(float(r.get("amount", 0.0))).strip(),
+                date_label,
+                time_label,
+                str(amount_usd).strip(),
             )
             if key in existing_keys:
                 skipped += 1
                 continue
+            unique_key = f"{str(project).strip()}_{date_label}_{time_label}_{amount_usd}"
             self.gs.append_row(
                 "USDC_HISTORY",
                 [
-                    recorded_at,
+                    unique_key,
+                    date_label,
+                    time_label,
+                    "received",
+                    amount_usd,
+                    amount_usd,   # Token_Amount（USDC は 1:1）
+                    "USDC",
+                    note or "",   # Source_Image（証跡URLがあれば）
                     str(project),
-                    r.get("date_str", ""),
-                    r.get("time_str", ""),
-                    r.get("datetime_jst", ""),
-                    float(r.get("amount", 0.0)),
-                    admin_name or "",
-                    admin_namespace or "",
-                    note or "",
+                    r.get("datetime_jst", ""),  # OCR_Raw_Text の代わりに datetime を格納
+                    created_at,
                 ],
             )
             existing_keys.add(key)  # 同一実行内の重複も防ぐ
