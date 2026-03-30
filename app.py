@@ -2336,8 +2336,10 @@ class AppUI:
             st.write(f"apr={apr}, yesterday_profit={yesterday_profit}, total_liquidity={total_liquidity}")
             st.write(f"total_members={total_members}, skip={skipped_members}, target_projects={target_projects}")
             st.write(f"input_sv_apr={st.session_state.get('input_sv_apr','')}, input_sv_profit={st.session_state.get('input_sv_profit','')}")
+            st.write(f"Ledger sheet: {self.repo.gs.names.LEDGER}")
 
-        if st.button("APRを確定して対象全員にLINE送信"):
+        if st.button("APRを確定して対象全員にLINE送信", key="apr_confirm_btn"):
+            _save_warnings: List[str] = []
             try:
                 if apr <= 0:
                     st.warning(f"⚠️ APRが0以下です（apr={apr}）。画像を再アップロードするか手動でAPRを入力してください。")
@@ -2349,7 +2351,7 @@ class AppUI:
                     if _imgbb_url:
                         evidence_url = _imgbb_url
                     else:
-                        st.warning("⚠️ 画像のImgBBアップロードに失敗しました（APIキー未設定の可能性）。エビデンスなしで保存を続行します。")
+                        _save_warnings.append("ImgBBアップロード失敗（APIキー未設定の可能性）。エビデンスなしで保存します。")
 
                 source_mode = U.detect_source_mode(
                     final_liquidity=float(total_liquidity),
@@ -2363,9 +2365,9 @@ class AppUI:
                 ts = U.fmt_dt(U.now_jst())
                 apr_ledger_count, line_log_count, success, fail, skip_count = 0, 0, 0, 0, 0
                 existing_apr_keys = self.repo.existing_apr_keys_for_date(today_key)
-                token = ExternalService.get_line_token(AdminAuth.current_namespace())
                 daily_add_map: Dict[Tuple[str, str], float] = {}
 
+                # SmartVault 履歴を記録
                 self.repo.append_smartvault_history(
                     dt_jst=ts,
                     project=project,
@@ -2382,10 +2384,18 @@ class AppUI:
                     note="APR確定時に保存",
                 )
 
+                # LINE トークン取得（失敗しても Ledger 書き込みは続ける）
+                token: Optional[str] = None
+                try:
+                    token = ExternalService.get_line_token(AdminAuth.current_namespace())
+                except Exception as _tok_e:
+                    _save_warnings.append(f"LINEトークン取得エラー（LINE送信をスキップ）: {_tok_e}")
+
+                # Ledger 書き込み & LINE 送信
                 for p in target_projects:
-                    row = settings_df[settings_df["Project_Name"] == str(p)].iloc[0]
-                    project_net_factor = float(row.get("Net_Factor", AppConfig.FACTOR["MASTER"]))
-                    compound_timing = U.normalize_compound(row.get("Compound_Timing", AppConfig.COMPOUND["NONE"]))
+                    _proj_row = settings_df[settings_df["Project_Name"] == str(p)].iloc[0]
+                    project_net_factor = float(_proj_row.get("Net_Factor", AppConfig.FACTOR["MASTER"]))
+                    compound_timing = U.normalize_compound(_proj_row.get("Compound_Timing", AppConfig.COMPOUND["NONE"]))
                     mem = self.repo.project_members_active(members_df, p)
                     if mem.empty:
                         continue
@@ -2435,8 +2445,8 @@ class AppUI:
                         if compound_timing == AppConfig.COMPOUND["DAILY"]:
                             personalized_msg += f"複利反映後運用額: {U.fmt_usd(person_after_amount)}\n"
 
-                        if not uid:
-                            code, line_note = 0, "LINE未送信: Line_User_IDなし"
+                        if not uid or token is None:
+                            code, line_note = 0, "LINE未送信: Line_User_IDなしまたはトークン未取得"
                         else:
                             code = ExternalService.send_line_push(token, uid, personalized_msg, evidence_url)
                             line_note = (
@@ -2455,25 +2465,30 @@ class AppUI:
                             fail += 1
 
                 if daily_add_map:
-                    for i in range(len(members_df)):
-                        p = str(members_df.loc[i, "Project_Name"]).strip()
-                        pn = str(members_df.loc[i, "PersonName"]).strip()
-                        addv = float(daily_add_map.get((p, pn), 0.0))
-                        if addv != 0.0 and U.truthy(members_df.loc[i, "IsActive"]):
-                            members_df.loc[i, "Principal"] = float(members_df.loc[i, "Principal"]) + addv
-                            members_df.loc[i, "UpdatedAt_JST"] = ts
+                    for _di in range(len(members_df)):
+                        _dp = str(members_df.loc[_di, "Project_Name"]).strip()
+                        _dpn = str(members_df.loc[_di, "PersonName"]).strip()
+                        _addv = float(daily_add_map.get((_dp, _dpn), 0.0))
+                        if _addv != 0.0 and U.truthy(members_df.loc[_di, "IsActive"]):
+                            members_df.loc[_di, "Principal"] = float(members_df.loc[_di, "Principal"]) + _addv
+                            members_df.loc[_di, "UpdatedAt_JST"] = ts
                     self.repo.write_members(members_df)
 
                 self.store.persist_and_refresh()
-                st.session_state["_apr_save_success"] = (
+                _success_msg = (
                     f"✅ APR記録:{apr_ledger_count}件 / LINE履歴記録:{line_log_count}件 / "
                     f"送信成功:{success} / 送信失敗:{fail} / 重複スキップ:{skip_count}件"
                 )
+                if _save_warnings:
+                    _success_msg += " ⚠️ " + " / ".join(_save_warnings)
+                st.session_state["_apr_save_success"] = _success_msg
                 st.rerun()
 
             except Exception as e:
+                import traceback as _tb
+                _err_detail = _tb.format_exc()
+                st.error(f"APR確定処理でエラー: {e}\n詳細: {_err_detail[:800]}")
                 st.session_state["_apr_save_error"] = f"APR確定処理でエラー: {e}"
-                st.rerun()
 
         if send_scope == "選択中プロジェクトのみ":
             row = settings_df[settings_df["Project_Name"] == str(project)].iloc[0]
