@@ -2298,12 +2298,13 @@ class AppUI:
                     st.warning("APRが0以下です。")
                     return
 
-                evidence_url = None
+                evidence_url = ""
                 if uploaded:
-                    evidence_url = ExternalService.upload_imgbb(uploaded.getvalue())
-                    if not evidence_url:
-                        st.error("画像アップロードに失敗しました。")
-                        return
+                    _imgbb_url = ExternalService.upload_imgbb(uploaded.getvalue())
+                    if _imgbb_url:
+                        evidence_url = _imgbb_url
+                    else:
+                        st.warning("⚠️ 画像のImgBBアップロードに失敗しました（APIキー未設定の可能性）。エビデンスなしで保存を続行します。")
 
                 source_mode = U.detect_source_mode(
                     final_liquidity=float(total_liquidity),
