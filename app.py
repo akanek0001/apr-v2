@@ -927,7 +927,8 @@ class GSheetService:
 
         ensure_key = (
             f"_sheet_ensured_{self.names.SETTINGS}_{self.names.MEMBERS}_{self.names.LEDGER}_"
-            f"{self.names.LINEUSERS}_{self.names.APR_SUMMARY}_{self.names.SMARTVAULT_HISTORY}"
+            f"{self.names.LINEUSERS}_{self.names.APR_SUMMARY}_{self.names.SMARTVAULT_HISTORY}_"
+            f"{self.names.USDC_HISTORY}"
         )
         if not st.session_state.get(ensure_key, False):
             for key in AppConfig.HEADERS:
