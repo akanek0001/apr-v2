@@ -2133,50 +2133,29 @@ class AppUI:
                         usdc_rows = [r for r in usdc_rows if r.get("amount") is not None]
                     if usdc_rows:
                         # ボタンクリック時の再レンダリングでも参照できるようsession_stateに保存
+                        total_amount = sum(r["amount"] for r in usdc_rows)
+                        # session_state に保存（ボタンクリック後の再レンダリングでも参照できるようにする）
                         st.session_state["_usdc_rows_cache"] = usdc_rows
                         st.session_state["_usdc_project_cache"] = str(project)
                         st.session_state["_usdc_raw_text_cache"] = usdc_result.get("raw_text", "")
-                        st.info(
-                            f"📋 SmartVaultサマリーではなく **USDC取引履歴** を検出しました（{len(usdc_rows)} 件）。\n\n"
-                            "合計金額を「昨日の収益」として設定できます。"
-                        )
-                        total_amount = sum(r["amount"] for r in usdc_rows)
-                        rows_df = pd.DataFrame([
-                            {
-                                "日付":   r["date_str"],
-                                "時刻":   r["time_str"],
-                                "金額($)": r["amount"],
-                            }
-                            for r in usdc_rows
-                        ])
-                        st.dataframe(rows_df, use_container_width=True, hide_index=True)
-                        st.markdown(f"**合計: {U.fmt_usd(total_amount)}**")
-
-                        if st.button(
-                            f"💰 昨日の収益 = {U.fmt_usd(total_amount)} として設定（APR自動計算）",
-                            key="usdc_set_profit_apr",
-                            use_container_width=True,
-                        ):
-                            st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
-                            st.session_state["ocr_yesterday_profit"] = total_amount
-                            # APR% を自動計算: profit ÷ (total_principal × factor) × 365 × 100
-                            try:
-                                _srow = settings_df[settings_df["Project_Name"] == str(project)].iloc[0]
-                                _factor = float(_srow.get("Net_Factor", AppConfig.FACTOR["MASTER"]))
-                                if _factor <= 0:
-                                    _factor = float(AppConfig.FACTOR["MASTER"])
-                                _mem_active = self.repo.project_members_active(members_df, project)
-                                _total_principal = float(_mem_active["Principal"].sum()) if not _mem_active.empty else 0.0
-                                if _total_principal > 0 and _factor > 0:
-                                    _auto_apr = (total_amount / (_total_principal * _factor)) * 365.0 * 100.0
-                                    st.session_state["sv_apr"] = f"{_auto_apr:.4f}"
-                                    st.session_state["ocr_apr"] = _auto_apr
-                            except Exception:
-                                pass  # APR自動計算失敗時は手動入力にフォールバック
-                            st.rerun()
-
-                        with st.expander("OCR生テキスト（USDC履歴）", expanded=False):
-                            st.text(usdc_result.get("raw_text") or "（テキスト取得なし）")
+                        st.session_state["_usdc_total_cache"] = total_amount
+                        # SmartVaultと同様に昨日の収益＋APR%を自動セットして即rerun
+                        st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
+                        st.session_state["ocr_yesterday_profit"] = total_amount
+                        try:
+                            _srow = settings_df[settings_df["Project_Name"] == str(project)].iloc[0]
+                            _factor = float(_srow.get("Net_Factor", AppConfig.FACTOR["MASTER"]))
+                            if _factor <= 0:
+                                _factor = float(AppConfig.FACTOR["MASTER"])
+                            _mem_active = self.repo.project_members_active(members_df, project)
+                            _total_principal = float(_mem_active["Principal"].sum()) if not _mem_active.empty else 0.0
+                            if _total_principal > 0 and _factor > 0:
+                                _auto_apr = (total_amount / (_total_principal * _factor)) * 365.0 * 100.0
+                                st.session_state["sv_apr"] = f"{_auto_apr:.4f}"
+                                st.session_state["ocr_apr"] = _auto_apr
+                        except Exception:
+                            pass  # APR自動計算失敗時は手動入力にフォールバック
+                        st.rerun()
                     else:
                         st.error(
                             "⚠️ OCRで数値を検出できませんでした（SmartVault / USDC取引履歴ともに未検出）。\n\n"
@@ -2197,9 +2176,21 @@ class AppUI:
                         "値が読み取れない場合は上の入力欄に手動で入力してください。"
                     )
 
-        # ── USDC保存ボタン（_should_ocr 外に配置することでボタンクリック後の再レンダリングでも動作） ──
+        # ── USDC OCR結果の表示＋保存ボタン（_should_ocr 外：rerun後も表示継続） ──
         _cached_usdc_rows = st.session_state.get("_usdc_rows_cache", [])
         if _cached_usdc_rows:
+            _cached_total = st.session_state.get("_usdc_total_cache", sum(r["amount"] for r in _cached_usdc_rows))
+            st.info(
+                f"📋 **USDC取引履歴** を検出しました（{len(_cached_usdc_rows)} 件）。"
+                f" 合計: **{U.fmt_usd(_cached_total)}** → 昨日の収益・APR% に自動セット済み"
+            )
+            _cached_rows_df = pd.DataFrame([
+                {"日付": r["date_str"], "時刻": r["time_str"], "金額($)": r["amount"]}
+                for r in _cached_usdc_rows
+            ])
+            st.dataframe(_cached_rows_df, use_container_width=True, hide_index=True)
+            with st.expander("OCR生テキスト（USDC履歴）", expanded=False):
+                st.text(st.session_state.get("_usdc_raw_text_cache") or "（テキスト取得なし）")
             if st.button(
                 "📊 USDC履歴をシートに保存",
                 key="usdc_save_to_sheet",
