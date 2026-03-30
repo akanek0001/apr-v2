@@ -551,9 +551,10 @@ class U:
             pass
         norm = re.sub(r"[ \t\u3000]+", " ", norm)
 
-        # Pattern: <月数>月 <日> at <HH>:<MM> <am|pm>
+        # Pattern: <月数>[月] <日> at <HH>:<MM> <am|pm>
+        # 「月」は英語OCRで欠落・誤読されることがあるため省略可能にする
         date_pat = re.compile(
-            r"(\d{1,2})月\s*(\d{1,2})\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)", re.IGNORECASE
+            r"(\d{1,2})[月月]?\s*(\d{1,2})\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)", re.IGNORECASE
         )
         # Pattern: $<amount>
         amount_pat = re.compile(r"\$\s*(\d[\d,]*(?:\.\d+)?)")
@@ -788,6 +789,7 @@ class ExternalService:
         crop_top_ratio: float,
         crop_right_ratio: float,
         crop_bottom_ratio: float,
+        language: str = "eng",
     ) -> str:
         # ── API キー取得 ──
         try:
@@ -808,7 +810,7 @@ class ExternalService:
                     files={"filename": (target_name, target_bytes)},
                     data={
                         "apikey": str(api_key).strip(),
-                        "language": "eng",
+                        "language": language,
                         "isOverlayRequired": False,
                         "OCREngine": engine,
                         "scale": True,
@@ -1632,13 +1634,14 @@ class AppUI:
         self.engine = engine
         self.store = store
 
-    def _ocr_crop_text(self, file_bytes: bytes, box: Dict[str, float]) -> str:
+    def _ocr_crop_text(self, file_bytes: bytes, box: Dict[str, float], language: str = "eng") -> str:
         return ExternalService.ocr_space_extract_text_with_crop(
             file_bytes=file_bytes,
             crop_left_ratio=box["left"],
             crop_top_ratio=box["top"],
             crop_right_ratio=box["right"],
             crop_bottom_ratio=box["bottom"],
+            language=language,
         )
 
     @staticmethod
@@ -1818,12 +1821,22 @@ class AppUI:
     def _ocr_usdc_history(self, file_bytes: bytes) -> Dict[str, Any]:
         """OCR a full USDC transaction history screenshot and return all extracted rows.
 
-        The entire image is sent to OCR (no crop) because the transaction list spans
-        the full height of the screen.  Each row yields date, time, and USD amount.
+        Uses Japanese OCR (jpn) so that month characters like '月' are correctly read.
+        Falls back to English OCR if the Japanese result yields no rows.
         """
         full_box = {"left": 0.0, "top": 0.05, "right": 1.0, "bottom": 0.98}
-        raw_text = self._ocr_crop_text(file_bytes, full_box)
+
+        # First try: Japanese OCR (reads 月 correctly)
+        raw_text = self._ocr_crop_text(file_bytes, full_box, language="jpn")
         rows = U.extract_transaction_rows(raw_text)
+
+        # Fallback: English OCR (regex tolerates missing 月)
+        if not rows:
+            raw_text_eng = self._ocr_crop_text(file_bytes, full_box, language="eng")
+            rows = U.extract_transaction_rows(raw_text_eng)
+            if rows:
+                raw_text = raw_text_eng
+
         return {"raw_text": raw_text, "rows": rows}
 
     def render_dashboard(self, members_df: pd.DataFrame, ledger_df: pd.DataFrame, apr_summary_df: pd.DataFrame) -> None:
@@ -1999,19 +2012,35 @@ class AppUI:
             st.caption(f"🔍 OCR実行中… 画像タイプ: {img_type_label}")
 
             _ocr_got_any = False  # Track if at least one value was detected
+            _usdc_early: Optional[Dict[str, Any]] = None  # USDC先行検出結果
 
             with st.spinner("OCR処理中... しばらくお待ちください"):
                 if is_mobile:
-                    result = self._ocr_smartvault_mobile_metrics(file_bytes, srow=srow_obj)
-                    liq_val    = result["total_liquidity"]
-                    profit_val = result["yesterday_profit"]
-                    apr_val    = result["apr_value"]
-                    boxes      = result["boxes"]
-                    texts      = {
-                        "流動性":     result["total_text"],
-                        "昨日の収益": result["profit_text"],
-                        "APR":       result["apr_text"],
-                    }
+                    # ── モバイル: USDC取引履歴を先に1回試す（高速化） ──
+                    _usdc_early = self._ocr_usdc_history(file_bytes)
+                    if _usdc_early.get("rows"):
+                        # USDC取引履歴と判断 → SmartVaultゾーンOCRをスキップ
+                        liq_val = profit_val = apr_val = None
+                        boxes = AppUI._build_sv_boxes(srow_obj)
+                        texts = {"流動性": "", "昨日の収益": "", "APR": ""}
+                        result = {
+                            "boxed_preview": U.draw_ocr_boxes(file_bytes, boxes),
+                            "boxes": boxes,
+                            "total_text": "", "profit_text": "", "apr_text": "",
+                            "total_liquidity": None, "yesterday_profit": None, "apr_value": None,
+                        }
+                    else:
+                        # USDC行なし → SmartVaultサマリーとして読む
+                        result = self._ocr_smartvault_mobile_metrics(file_bytes, srow=srow_obj)
+                        liq_val    = result["total_liquidity"]
+                        profit_val = result["yesterday_profit"]
+                        apr_val    = result["apr_value"]
+                        boxes      = result["boxes"]
+                        texts      = {
+                            "流動性":     result["total_text"],
+                            "昨日の収益": result["profit_text"],
+                            "APR":       result["apr_text"],
+                        }
                 else:
                     result = self._ocr_pc_metrics(
                         file_bytes,
@@ -2089,9 +2118,14 @@ class AppUI:
             else:
                 # ── USDC取引履歴フォールバック（モバイルかつ全値None のとき） ──
                 if is_mobile:
-                    with st.spinner("USDC取引履歴として再読み取り中..."):
-                        usdc_result = self._ocr_usdc_history(file_bytes)
+                    # 先行USDC検出済みならAPI再呼び出し不要
+                    if _usdc_early is not None:
+                        usdc_result = _usdc_early
                         usdc_rows = usdc_result.get("rows", [])
+                    else:
+                        with st.spinner("USDC取引履歴として再読み取り中..."):
+                            usdc_result = self._ocr_usdc_history(file_bytes)
+                            usdc_rows = usdc_result.get("rows", [])
                     if usdc_rows:
                         st.info(
                             f"📋 SmartVaultサマリーではなく **USDC取引履歴** を検出しました（{len(usdc_rows)} 件）。\n\n"
