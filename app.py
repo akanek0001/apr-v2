@@ -1923,6 +1923,19 @@ class AppUI:
         st.subheader("📈 APR 確定")
         st.caption(f"{AppConfig.RANK_LABEL} / PERSONAL=個別計算 / GROUP=総額均等割 / 管理者: {AdminAuth.current_label()}")
 
+        # OCR結果をwidgetに反映（pendingキー経由）
+        # ※ Streamlitはwidget初回作成後 value= 引数を無視するため、
+        #   widget key に直接セットする必要があるが、それはwidget render前のみ可能。
+        #   そのため OCR セクションでは _pending_input_sv_* に値を入れ、
+        #   ここで widget key へ移し替えてから text_input を描画する。
+        for _psrc, _wkey in [
+            ("_pending_input_sv_liq",    "input_sv_liq"),
+            ("_pending_input_sv_profit", "input_sv_profit"),
+            ("_pending_input_sv_apr",    "input_sv_apr"),
+        ]:
+            if _psrc in st.session_state:
+                st.session_state[_wkey] = st.session_state.pop(_psrc)
+
         projects = self.repo.active_projects(settings_df)
         if not projects:
             st.warning("有効（Active=TRUE）のプロジェクトがありません。")
@@ -2101,15 +2114,15 @@ class AppUI:
 
             # ── Store detected values into session_state ──
             if liq_val is not None:
-                st.session_state["sv_total_liquidity"] = f"{float(liq_val):,.2f}"
+                st.session_state["_pending_input_sv_liq"] = f"{float(liq_val):,.2f}"
                 st.session_state["ocr_total_liquidity"] = float(liq_val)
                 _ocr_got_any = True
             if profit_val is not None:
-                st.session_state["sv_yesterday_profit"] = f"{float(profit_val):,.2f}"
+                st.session_state["_pending_input_sv_profit"] = f"{float(profit_val):,.2f}"
                 st.session_state["ocr_yesterday_profit"] = float(profit_val)
                 _ocr_got_any = True
             if apr_val is not None:
-                st.session_state["sv_apr"] = f"{float(apr_val):.4f}"
+                st.session_state["_pending_input_sv_apr"] = f"{float(apr_val):.4f}"
                 st.session_state["ocr_apr"] = float(apr_val)
                 _ocr_got_any = True
 
@@ -2140,7 +2153,8 @@ class AppUI:
                         st.session_state["_usdc_raw_text_cache"] = usdc_result.get("raw_text", "")
                         st.session_state["_usdc_total_cache"] = total_amount
                         # SmartVaultと同様に昨日の収益＋APR%を自動セットして即rerun
-                        st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
+                        # ※ _pending_input_sv_* 経由で render_apr 先頭で widget key にセット
+                        st.session_state["_pending_input_sv_profit"] = f"{total_amount:,.2f}"
                         st.session_state["ocr_yesterday_profit"] = total_amount
                         try:
                             _srow = settings_df[settings_df["Project_Name"] == str(project)].iloc[0]
@@ -2151,7 +2165,7 @@ class AppUI:
                             _total_principal = float(_mem_active["Principal"].sum()) if not _mem_active.empty else 0.0
                             if _total_principal > 0 and _factor > 0:
                                 _auto_apr = (total_amount / (_total_principal * _factor)) * 365.0 * 100.0
-                                st.session_state["sv_apr"] = f"{_auto_apr:.4f}"
+                                st.session_state["_pending_input_sv_apr"] = f"{_auto_apr:.4f}"
                                 st.session_state["ocr_apr"] = _auto_apr
                         except Exception:
                             pass  # APR自動計算失敗時は手動入力にフォールバック
