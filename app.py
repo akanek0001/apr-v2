@@ -2114,6 +2114,7 @@ class AppUI:
 
             if _ocr_got_any:
                 # Values stored → rerun so the text inputs and summary at the top refresh
+                st.session_state.pop("_usdc_rows_cache", None)
                 st.rerun()
             else:
                 # ── USDC取引履歴フォールバック（モバイルかつ全値None のとき） ──
@@ -2130,6 +2131,10 @@ class AppUI:
                         # amount が None の行（金額未取得）を除外
                         usdc_rows = [r for r in usdc_rows if r.get("amount") is not None]
                     if usdc_rows:
+                        # ボタンクリック時の再レンダリングでも参照できるようsession_stateに保存
+                        st.session_state["_usdc_rows_cache"] = usdc_rows
+                        st.session_state["_usdc_project_cache"] = str(project)
+                        st.session_state["_usdc_raw_text_cache"] = usdc_result.get("raw_text", "")
                         st.info(
                             f"📋 SmartVaultサマリーではなく **USDC取引履歴** を検出しました（{len(usdc_rows)} 件）。\n\n"
                             "合計金額を「昨日の収益」として設定できます。"
@@ -2146,37 +2151,14 @@ class AppUI:
                         st.dataframe(rows_df, use_container_width=True, hide_index=True)
                         st.markdown(f"**合計: {U.fmt_usd(total_amount)}**")
 
-                        col_set, col_save = st.columns(2)
-                        with col_set:
-                            if st.button(
-                                f"💰 昨日の収益 = {U.fmt_usd(total_amount)} として設定",
-                                key="usdc_set_profit_apr",
-                                use_container_width=True,
-                            ):
-                                st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
-                                st.session_state["ocr_yesterday_profit"] = total_amount
-                                st.rerun()
-                        with col_save:
-                            if st.button(
-                                "📊 USDC履歴をシートに保存",
-                                key="usdc_save_to_sheet",
-                                use_container_width=True,
-                            ):
-                                try:
-                                    written, skipped = self.repo.append_usdc_history_rows(
-                                        rows=usdc_rows,
-                                        project=str(project),
-                                        admin_name=AdminAuth.current_label(),
-                                        admin_namespace=AdminAuth.current_namespace(),
-                                    )
-                                    if written > 0 and skipped == 0:
-                                        st.success(f"✅ {written} 件を USDC_History シートに保存しました。")
-                                    elif written > 0:
-                                        st.success(f"✅ {written} 件保存しました（{skipped} 件は重複のためスキップ）。")
-                                    else:
-                                        st.info(f"ℹ️ 全 {skipped} 件は既にシートに存在するためスキップしました。")
-                                except Exception as _e:
-                                    st.error(f"保存エラー: {_e}")
+                        if st.button(
+                            f"💰 昨日の収益 = {U.fmt_usd(total_amount)} として設定",
+                            key="usdc_set_profit_apr",
+                            use_container_width=True,
+                        ):
+                            st.session_state["sv_yesterday_profit"] = f"{total_amount:,.2f}"
+                            st.session_state["ocr_yesterday_profit"] = total_amount
+                            st.rerun()
 
                         with st.expander("OCR生テキスト（USDC履歴）", expanded=False):
                             st.text(usdc_result.get("raw_text") or "（テキスト取得なし）")
@@ -2199,6 +2181,31 @@ class AppUI:
                         "3. 数値が画面に表示されていない → 正しいページのスクショか確認してください。\n\n"
                         "値が読み取れない場合は上の入力欄に手動で入力してください。"
                     )
+
+        # ── USDC保存ボタン（_should_ocr 外に配置することでボタンクリック後の再レンダリングでも動作） ──
+        _cached_usdc_rows = st.session_state.get("_usdc_rows_cache", [])
+        if _cached_usdc_rows:
+            if st.button(
+                "📊 USDC履歴をシートに保存",
+                key="usdc_save_to_sheet",
+                use_container_width=True,
+            ):
+                try:
+                    _save_project = st.session_state.get("_usdc_project_cache", str(project))
+                    written, skipped = self.repo.append_usdc_history_rows(
+                        rows=_cached_usdc_rows,
+                        project=_save_project,
+                        admin_name=AdminAuth.current_label(),
+                        admin_namespace=AdminAuth.current_namespace(),
+                    )
+                    if written > 0 and skipped == 0:
+                        st.success(f"✅ {written} 件を USDC_History シートに保存しました。")
+                    elif written > 0:
+                        st.success(f"✅ {written} 件保存しました（{skipped} 件は重複のためスキップ）。")
+                    else:
+                        st.info(f"ℹ️ 全 {skipped} 件は既にシートに存在するためスキップしました。")
+                except Exception as _e:
+                    st.error(f"保存エラー: {_e}")
 
         target_projects = projects if send_scope == "全有効プロジェクト" else [project]
         today_key = U.fmt_date(U.now_jst())
