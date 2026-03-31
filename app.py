@@ -1865,11 +1865,12 @@ class AppUI:
         """
         full_box = {"left": 0.0, "top": 0.05, "right": 1.0, "bottom": 0.98}
 
-        # First try: Japanese OCR (reads 月 correctly) — fast=True で1APIコール
-        raw_text = self._ocr_crop_text(file_bytes, full_box, language="jpn", fast=True)
+        # First try: Japanese OCR — engine=2(Tesseract)優先で「月」を正確に読む
+        # fast=False にすることで engine=2→1 の順で試行（月の文字化け防止）
+        raw_text = self._ocr_crop_text(file_bytes, full_box, language="jpn", fast=False)
         rows = U.extract_transaction_rows(raw_text)
 
-        # Fallback: English OCR (regex tolerates missing 月) — fast=True で1APIコール
+        # Fallback: English OCR — 月が欠落していてもregexで許容するのでfast=True(1コール)で十分
         if not rows:
             raw_text_eng = self._ocr_crop_text(file_bytes, full_box, language="eng", fast=True)
             rows = U.extract_transaction_rows(raw_text_eng)
