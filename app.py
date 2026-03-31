@@ -542,59 +542,79 @@ class U:
 
         Expected OCR line format (Japanese wallet app):
           "3月 29 at 10:44 am"  followed somewhere by  "$28.19"
+
+        「月」は engine=1 OCR で "B" 等に文字化けすることがある。
+        また画像レイアウト上、全日付が先に並び全金額が後にまとまる場合がある
+        （カラム読み）ため、その場合は位置ベース（i番目日付↔i番目金額）でマッチする。
         """
         if not text:
             return []
 
-        # Normalise common OCR mis-reads
-        norm = text
-        for k, v in {"O": "0", "o": "0", "l": "1", "I": "1", "S": "5", "s": "5"}.items():
-            # Only replace in digit contexts to avoid mangling Japanese characters
-            pass
-        norm = re.sub(r"[ \t\u3000]+", " ", norm)
+        norm = re.sub(r"[ \t\u3000]+", " ", text)
 
-        # Pattern: <月数>[月] <日> at <HH>:<MM> <am|pm>
-        # 「月」は英語OCRで欠落・誤読されることがあるため省略可能にする
+        # Pattern: <月数>[月 or OCR誤読文字 or 省略]\s*<日> at <HH>:<MM> <am|pm>
+        # [^\d\s]? — 1文字の非数字・非スペース（月・B・Bなど何でも）を許容
         date_pat = re.compile(
-            r"(\d{1,2})[月月]?\s*(\d{1,2})\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)", re.IGNORECASE
+            r"(\d{1,2})[^\d\s]?\s*(\d{1,2})\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)",
+            re.IGNORECASE,
         )
-        # Pattern: $<amount>
         amount_pat = re.compile(r"\$\s*(\d[\d,]*(?:\.\d+)?)")
 
         date_matches = list(date_pat.finditer(norm))
-        rows: List[Dict[str, Any]] = []
+        all_amount_matches = list(amount_pat.finditer(norm))
 
+        if not date_matches:
+            return []
+
+        # ── チャンクベースで金額を収集 ──
+        chunk_amounts: List[Optional[str]] = []
         for i, dm in enumerate(date_matches):
-            # Extract text chunk from this date to the next
             start = dm.start()
             end = date_matches[i + 1].start() if i + 1 < len(date_matches) else len(norm)
             chunk = norm[start:end]
+            found = amount_pat.findall(chunk)
+            chunk_amounts.append(found[0] if found else None)
 
+        # ── カラムレイアウト検出：大半のチャンクに金額がなく全金額が末尾にまとまる場合 ──
+        n_found = sum(1 for a in chunk_amounts if a is not None)
+        use_positional = (
+            n_found <= 1
+            and len(all_amount_matches) >= len(date_matches)
+        )
+        if use_positional:
+            # i番目の日付 → i番目の金額（カラム順一致）
+            pos_amounts = [m.group(1) for m in all_amount_matches]
+            final_amounts: List[Optional[str]] = (
+                pos_amounts[: len(date_matches)]
+                + [None] * max(0, len(date_matches) - len(pos_amounts))
+            )
+        else:
+            final_amounts = chunk_amounts
+
+        rows: List[Dict[str, Any]] = []
+        for i, dm in enumerate(date_matches):
             month = int(dm.group(1))
             day = int(dm.group(2))
             time_str = dm.group(3)
             ampm = dm.group(4).lower()
 
-            # Convert to 24-hour
             hour, minute = (int(p) for p in time_str.split(":"))
             if ampm == "pm" and hour != 12:
                 hour += 12
             elif ampm == "am" and hour == 12:
                 hour = 0
 
-            # Best-guess year = current JST year
             try:
                 year = U.now_jst().year
                 dt = datetime(year, month, day, hour, minute, tzinfo=AppConfig.JST)
             except ValueError:
                 dt = None
 
-            # Dollar amounts in this chunk — take the first (typically the primary amount)
-            amounts_found = amount_pat.findall(chunk)
+            amt_str = final_amounts[i]
             amount: Optional[float] = None
-            if amounts_found:
+            if amt_str:
                 try:
-                    amount = float(amounts_found[0].replace(",", ""))
+                    amount = float(str(amt_str).replace(",", ""))
                 except ValueError:
                     pass
 
