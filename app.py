@@ -2371,12 +2371,6 @@ class AppUI:
         with st.expander("個人別の本日配当（確認）", expanded=False):
             st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
 
-        # 保存前デバッグ情報
-        with st.expander("🔍 保存前デバッグ情報（問題診断用）", expanded=True):
-            st.write(f"apr={apr}, yesterday_profit={yesterday_profit}, total_liquidity={total_liquidity}")
-            st.write(f"total_members={total_members}, skip={skipped_members}, target_projects={target_projects}")
-            st.write(f"input_sv_apr={st.session_state.get('input_sv_apr','')}, input_sv_profit={st.session_state.get('input_sv_profit','')}")
-            st.write(f"Ledger sheet: {self.repo.gs.names.LEDGER} / namespace: '{AdminAuth.current_namespace()}'")
 
         if st.button("APRを確定して対象全員にLINE送信", key="apr_confirm_btn"):
             st.write("⏳ 保存処理を開始します...")
