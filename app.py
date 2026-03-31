@@ -2360,6 +2360,7 @@ class AppUI:
             st.write(f"Ledger sheet: {self.repo.gs.names.LEDGER} / namespace: '{AdminAuth.current_namespace()}'")
 
         if st.button("APRを確定して対象全員にLINE送信", key="apr_confirm_btn"):
+            st.write("⏳ 保存処理を開始します...")
             _save_warnings: List[str] = []
             try:
                 if apr <= 0:
@@ -2388,6 +2389,7 @@ class AppUI:
                 existing_apr_keys = self.repo.existing_apr_keys_for_date(today_key)
                 daily_add_map: Dict[Tuple[str, str], float] = {}
 
+                st.write(f"📝 SmartVault_History に書き込み中... (sheet: {self.repo.gs.names.SMARTVAULT_HISTORY})")
                 # SmartVault 履歴を記録
                 self.repo.append_smartvault_history(
                     dt_jst=ts,
@@ -2404,14 +2406,21 @@ class AppUI:
                     admin_namespace=AdminAuth.current_namespace(),
                     note="APR確定時に保存",
                 )
+                st.write("✅ SmartVault_History 書き込み完了")
 
-                # LINE トークン取得（失敗しても Ledger 書き込みは続ける）
-                token: Optional[str] = None
-                try:
-                    token = ExternalService.get_line_token(AdminAuth.current_namespace())
-                except Exception as _tok_e:
-                    _save_warnings.append(f"LINEトークン取得エラー（LINE送信をスキップ）: {_tok_e}")
+                # LINE トークン取得 — get_line_token は st.stop() を呼ぶため直接 secrets を参照する
+                _ns = AdminAuth.current_namespace()
+                _line_sec = st.secrets.get("line", {}) or {}
+                _line_tokens = _line_sec.get("tokens") or {}
+                token: Optional[str] = (
+                    (str(_line_tokens.get(_ns, "")).strip() if isinstance(_line_tokens, dict) else "")
+                    or str(_line_sec.get("channel_access_token", "")).strip()
+                    or None
+                )
+                if not token:
+                    _save_warnings.append(f"LINEトークン未設定 (ns={_ns})。LINE送信をスキップして保存のみ続行。")
 
+                st.write(f"📝 Ledger に書き込み中... (sheet: {self.repo.gs.names.LEDGER})")
                 # Ledger 書き込み & LINE 送信
                 for p in target_projects:
                     _proj_row = settings_df[settings_df["Project_Name"] == str(p)].iloc[0]
