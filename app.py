@@ -1400,19 +1400,21 @@ class Repository:
     ) -> Tuple[int, int]:
         """Write USDC transaction history rows (from OCR) to USDC_History sheet.
 
-        Skips rows that already exist (duplicate = Source_Project + Date_Label + Time_Label + Amount_USD).
+        重複チェックキー: (Source_Project, OCR_Raw_Text[=datetime_jst], Amount_USD)
+        OCRパース済みの datetime_jst ("2026-03-29 10:44:00" 形式) を使うことで
+        日付表記の揺れ（"3月29日" vs "3/29" 等）に左右されない安定した重複検出を実現。
         Returns (written_count, skipped_count).
         """
-        # Load existing rows to build duplicate key set
-        existing_keys: Set[Tuple[str, str, str, str]] = set()
+        # 既存行から重複チェックキーセットを構築
+        # キー = (Source_Project, datetime_jst, Amount_USD)
+        existing_keys: Set[Tuple[str, str, str]] = set()
         try:
             existing_df = self.gs.load_df("USDC_HISTORY")
             if not existing_df.empty:
                 for _, ex in existing_df.iterrows():
                     key = (
                         str(ex.get("Source_Project", "")).strip(),
-                        str(ex.get("Date_Label", "")).strip(),
-                        str(ex.get("Time_Label", "")).strip(),
+                        str(ex.get("OCR_Raw_Text", "")).strip(),   # datetime_jst を格納済み
                         str(ex.get("Amount_USD", "")).strip(),
                     )
                     existing_keys.add(key)
@@ -1422,19 +1424,20 @@ class Repository:
         created_at = U.fmt_dt(U.now_jst())
         written, skipped = 0, 0
         for r in rows:
-            date_label = str(r.get("date_str", "")).strip()
-            time_label = str(r.get("time_str", "")).strip()
-            amount_usd = float(r.get("amount", 0.0))
-            key = (
-                str(project).strip(),
-                date_label,
-                time_label,
-                str(amount_usd).strip(),
-            )
+            date_label  = str(r.get("date_str", "")).strip()       # 例: "3月29日"
+            time_label  = str(r.get("time_str", "")).strip()       # 例: "10:44 am"
+            datetime_jst = str(r.get("datetime_jst", "")).strip()  # 例: "2026-03-29 10:44:00"
+            amount_usd  = float(r.get("amount", 0.0))
+
+            # datetime_jst が取れていない場合は date_label + time_label で代用
+            dedup_dt = datetime_jst if datetime_jst else f"{date_label} {time_label}"
+            key = (str(project).strip(), dedup_dt, str(amount_usd).strip())
+
             if key in existing_keys:
                 skipped += 1
                 continue
-            unique_key = f"{str(project).strip()}_{date_label}_{time_label}_{amount_usd}"
+
+            unique_key = f"{str(project).strip()}_{dedup_dt}_{amount_usd}"
             self.gs.append_row(
                 "USDC_HISTORY",
                 [
@@ -1443,12 +1446,12 @@ class Repository:
                     time_label,
                     "received",
                     amount_usd,
-                    amount_usd,   # Token_Amount（USDC は 1:1）
+                    amount_usd,    # Token_Amount（USDC は 1:1）
                     "USDC",
-                    note or "",   # Source_Image（証跡URLがあれば）
-                    str(project),
-                    r.get("datetime_jst", ""),  # OCR_Raw_Text の代わりに datetime を格納
-                    created_at,
+                    note or "",    # Source_Image
+                    str(project),  # Source_Project
+                    dedup_dt,      # OCR_Raw_Text に OCRパース済み datetime を記録
+                    created_at,    # CreatedAt_JST
                 ],
             )
             existing_keys.add(key)  # 同一実行内の重複も防ぐ
@@ -1899,83 +1902,212 @@ class AppUI:
         return {"raw_text": raw_text, "rows": rows}
 
     def render_dashboard(self, members_df: pd.DataFrame, ledger_df: pd.DataFrame, apr_summary_df: pd.DataFrame) -> None:
-        st.subheader("📊 管理画面ダッシュボード")
-        st.caption("総資産 / 本日APR / グループ別残高 / 個人残高 / 個人別累計APR / LINE通知履歴")
+        now = U.now_jst()
+        st.markdown(
+            f"## 📊 ダッシュボード"
+            f"<span style='float:right;font-size:0.8em;color:#888;line-height:2.5'>{now.strftime('%Y/%m/%d %H:%M')} JST</span>",
+            unsafe_allow_html=True,
+        )
 
-        active_mem = members_df[members_df["IsActive"] == True].copy() if not members_df.empty else members_df.copy()
+        # ── 基本集計 ──
+        active_mem = members_df[members_df["IsActive"] == True].copy() if not members_df.empty else pd.DataFrame()
         total_assets = float(active_mem["Principal"].sum()) if not active_mem.empty else 0.0
+        member_count = len(active_mem)
 
-        today_prefix, today_apr = U.fmt_date(U.now_jst()), 0.0
+        today_prefix = U.fmt_date(now)
+        yesterday_prefix = U.fmt_date(now - timedelta(days=1))
+        today_apr, yesterday_apr, total_apr_paid = 0.0, 0.0, 0.0
+
         if not ledger_df.empty and "Datetime_JST" in ledger_df.columns:
-            today_rows = ledger_df[ledger_df["Datetime_JST"].astype(str).str.startswith(today_prefix)].copy()
-            today_apr = float(today_rows[today_rows["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"]]["Amount"].sum())
+            apr_rows = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"]].copy()
+            apr_rows["Amount"] = U.to_num_series(apr_rows["Amount"])
+            today_apr = float(apr_rows[apr_rows["Datetime_JST"].astype(str).str.startswith(today_prefix)]["Amount"].sum())
+            yesterday_apr = float(apr_rows[apr_rows["Datetime_JST"].astype(str).str.startswith(yesterday_prefix)]["Amount"].sum())
+            total_apr_paid = float(apr_rows["Amount"].sum())
 
-        c1, c2 = st.columns(2)
-        c1.metric("総資産", U.fmt_usd(total_assets))
-        c2.metric("本日APR", U.fmt_usd(today_apr))
+        today_delta = today_apr - yesterday_apr
 
-        st.divider()
-        c3, c4 = st.columns(2)
-
-        with c3:
-            st.markdown("#### グループ別残高")
-            group_df = active_mem[active_mem["Project_Name"].astype(str).str.upper() != AppConfig.PROJECT["PERSONAL"]].copy() if not active_mem.empty else pd.DataFrame()
-            if group_df.empty:
-                st.info("グループデータがありません。")
-            else:
-                group_summary = group_df.groupby("Project_Name", as_index=False).agg(人数=("PersonName", "count"), 総残高=("Principal", "sum")).sort_values("総残高", ascending=False)
-                group_summary["総残高"] = group_summary["総残高"].apply(U.fmt_usd)
-                st.dataframe(group_summary, use_container_width=True, hide_index=True)
-
-        with c4:
-            st.markdown("#### 個人残高")
-            personal_df = active_mem[active_mem["Project_Name"].astype(str).str.upper() == AppConfig.PROJECT["PERSONAL"]].copy() if not active_mem.empty else pd.DataFrame()
-            if personal_df.empty:
-                st.info("PERSONAL データがありません。")
-            else:
-                p = personal_df[["PersonName", "Principal", "LINE_DisplayName"]].copy()
-                p["資産割合"] = p["Principal"].map(lambda x: f"{(float(x) / total_assets) * 100:.2f}%" if total_assets > 0 else "0.00%")
-                p["Principal_num"] = p["Principal"].astype(float)
-                p["Principal"] = p["Principal"].apply(U.fmt_usd)
-                p = p.sort_values("Principal_num", ascending=False)[["PersonName", "Principal", "資産割合", "LINE_DisplayName"]]
-                st.dataframe(p, use_container_width=True, hide_index=True)
+        # ── サマリーカード 4列 ──
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("💰 総資産", U.fmt_usd(total_assets))
+        mc2.metric("📈 本日APR", U.fmt_usd(today_apr), delta=f"{'+' if today_delta >= 0 else ''}{today_delta:,.2f} vs 昨日")
+        mc3.metric("👥 運用中メンバー", f"{member_count} 名")
+        mc4.metric("💵 累計APR支払い", U.fmt_usd(total_apr_paid))
 
         st.divider()
-        st.markdown("#### 個人別 累計APR")
-        if apr_summary_df.empty:
-            st.info("APR履歴がありません。")
-        else:
-            view = apr_summary_df.copy()
-            view["Total_APR_num"] = U.to_num_series(view["Total_APR"])
-            view["Total_APR"] = view["Total_APR_num"].apply(U.fmt_usd)
-            view = view.sort_values("Total_APR_num", ascending=False)[["PersonName", "Total_APR", "APR_Count", "Asset_Ratio", "LINE_DisplayName"]]
-            view = view.rename(columns={"Total_APR": "累計APR", "APR_Count": "件数", "Asset_Ratio": "総資産比"})
-            st.dataframe(view, use_container_width=True, hide_index=True)
 
-        st.divider()
-        st.markdown("#### LINE通知履歴")
-        c_hist1, c_hist2 = st.columns([1, 1])
-        with c_hist1:
-            if st.button("LINE送信履歴をリセット表示", use_container_width=True):
-                st.session_state["hide_line_history"] = True
-                st.rerun()
-        with c_hist2:
-            if st.button("LINE送信履歴を再表示", use_container_width=True):
-                st.session_state["hide_line_history"] = False
-                st.rerun()
+        # ── タブ ──
+        tab_asset, tab_apr, tab_line = st.tabs(["💼 資産状況", "📈 APR推移", "📩 LINE通知履歴"])
 
-        if st.session_state.get("hide_line_history", False):
-            st.info("LINE通知履歴はリセット表示中です。シートの記録は削除していません。")
-        else:
-            if ledger_df.empty:
-                st.info("通知履歴がありません。")
-            else:
-                line_hist = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["LINE"]].copy()
-                if line_hist.empty:
-                    st.info("LINE通知履歴はまだありません。")
+        # ════════════════════════════════════════
+        # TAB 1 — 資産状況
+        # ════════════════════════════════════════
+        with tab_asset:
+            col_l, col_r = st.columns([3, 2])
+
+            with col_l:
+                st.markdown("##### 👤 個人別運用残高")
+                personal_df = active_mem[active_mem["Project_Name"].astype(str).str.upper() == AppConfig.PROJECT["PERSONAL"]].copy() if not active_mem.empty else pd.DataFrame()
+                if personal_df.empty:
+                    st.info("PERSONAL データがありません。")
                 else:
-                    cols = [c for c in ["Datetime_JST", "Project_Name", "PersonName", "Type", "Line_User_ID", "LINE_DisplayName", "Note", "Source"] if c in line_hist.columns]
-                    st.dataframe(line_hist.sort_values("Datetime_JST", ascending=False)[cols].head(100), use_container_width=True, hide_index=True)
+                    p = personal_df[["PersonName", "Principal"]].copy()
+                    p["Principal"] = p["Principal"].astype(float)
+                    p = p.sort_values("Principal", ascending=False)
+                    # バーチャート
+                    chart_df = p.set_index("PersonName")["Principal"]
+                    st.bar_chart(chart_df, use_container_width=True)
+
+            with col_r:
+                st.markdown("##### 📋 残高一覧")
+                if not personal_df.empty:
+                    disp = personal_df[["PersonName", "Principal", "LINE_DisplayName"]].copy()
+                    disp["割合"] = disp["Principal"].astype(float).map(
+                        lambda x: f"{x / total_assets * 100:.1f}%" if total_assets > 0 else "—"
+                    )
+                    disp["残高"] = disp["Principal"].astype(float).apply(U.fmt_usd)
+                    disp = disp.sort_values("Principal", ascending=False)[["PersonName", "残高", "割合"]]
+                    st.dataframe(disp, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            col_g1, col_g2 = st.columns(2)
+            with col_g1:
+                st.markdown("##### 🏢 グループ別残高")
+                group_df = active_mem[active_mem["Project_Name"].astype(str).str.upper() != AppConfig.PROJECT["PERSONAL"]].copy() if not active_mem.empty else pd.DataFrame()
+                if group_df.empty:
+                    st.info("グループデータがありません。")
+                else:
+                    gs = group_df.groupby("Project_Name", as_index=False).agg(
+                        人数=("PersonName", "count"), 総残高=("Principal", "sum")
+                    ).sort_values("総残高", ascending=False)
+                    gs["総残高表示"] = gs["総残高"].apply(U.fmt_usd)
+                    st.dataframe(gs[["Project_Name", "人数", "総残高表示"]].rename(columns={"総残高表示": "総残高"}), use_container_width=True, hide_index=True)
+
+            with col_g2:
+                st.markdown("##### 🏆 累計APR ランキング")
+                if apr_summary_df.empty:
+                    st.info("APR履歴がありません。")
+                else:
+                    rank = apr_summary_df.copy()
+                    rank["Total_APR_num"] = U.to_num_series(rank["Total_APR"])
+                    rank = rank.sort_values("Total_APR_num", ascending=False).reset_index(drop=True)
+                    rank.index = rank.index + 1
+                    rank["累計APR"] = rank["Total_APR_num"].apply(U.fmt_usd)
+                    rank["件数"] = rank["APR_Count"].astype(str)
+                    rank["総資産比"] = rank["Asset_Ratio"]
+                    st.dataframe(rank[["PersonName", "累計APR", "件数", "総資産比"]], use_container_width=True)
+
+        # ════════════════════════════════════════
+        # TAB 2 — APR推移
+        # ════════════════════════════════════════
+        with tab_apr:
+            if ledger_df.empty or "Datetime_JST" not in ledger_df.columns:
+                st.info("APR履歴がありません。")
+            else:
+                apr_hist = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"]].copy()
+                apr_hist["Amount"] = U.to_num_series(apr_hist["Amount"])
+                apr_hist["Date"] = apr_hist["Datetime_JST"].astype(str).str[:10]
+
+                if apr_hist.empty:
+                    st.info("APR記録がありません。")
+                else:
+                    # 期間フィルター
+                    days_opt = st.radio("表示期間", ["直近7日", "直近30日", "直近90日", "全期間"], horizontal=True, index=1)
+                    days_map = {"直近7日": 7, "直近30日": 30, "直近90日": 90, "全期間": 9999}
+                    cutoff = (now - timedelta(days=days_map[days_opt])).strftime("%Y-%m-%d")
+                    filtered = apr_hist[apr_hist["Date"] >= cutoff].copy()
+
+                    # 日別合計
+                    daily = filtered.groupby("Date")["Amount"].sum().reset_index().sort_values("Date")
+                    daily.columns = ["日付", "APR合計"]
+
+                    col_ch1, col_ch2 = st.columns([3, 1])
+                    with col_ch1:
+                        st.markdown("##### 📅 日別 APR 合計")
+                        st.line_chart(daily.set_index("日付")["APR合計"], use_container_width=True)
+                    with col_ch2:
+                        st.markdown("##### 📊 統計")
+                        st.metric("平均日次APR", U.fmt_usd(float(daily["APR合計"].mean()) if not daily.empty else 0))
+                        st.metric("最大日次APR", U.fmt_usd(float(daily["APR合計"].max()) if not daily.empty else 0))
+                        st.metric("記録日数", f"{len(daily)} 日")
+
+                    st.divider()
+
+                    # 個人別 APR 推移
+                    st.markdown("##### 👤 個人別 APR 推移")
+                    persons = sorted(filtered["PersonName"].astype(str).unique().tolist())
+                    sel_persons = st.multiselect("メンバー選択", persons, default=persons)
+                    if sel_persons:
+                        pivot = (
+                            filtered[filtered["PersonName"].astype(str).isin(sel_persons)]
+                            .groupby(["Date", "PersonName"])["Amount"]
+                            .sum()
+                            .unstack("PersonName")
+                            .fillna(0)
+                        )
+                        pivot.index.name = "日付"
+                        st.line_chart(pivot, use_container_width=True)
+
+                    st.divider()
+                    with st.expander("📋 APR 詳細テーブル", expanded=False):
+                        detail = filtered.copy()
+                        show_cols = [c for c in ["Datetime_JST", "Project_Name", "PersonName", "Amount", "Note"] if c in detail.columns]
+                        detail["Amount"] = detail["Amount"].apply(U.fmt_usd)
+                        st.dataframe(detail.sort_values("Datetime_JST", ascending=False)[show_cols].head(200), use_container_width=True, hide_index=True)
+
+        # ════════════════════════════════════════
+        # TAB 3 — LINE通知履歴
+        # ════════════════════════════════════════
+        with tab_line:
+            if st.session_state.get("hide_line_history", False):
+                st.info("LINE通知履歴はリセット表示中です。シートの記録は削除していません。")
+                if st.button("📋 LINE通知履歴を再表示", key="line_hist_show"):
+                    st.session_state["hide_line_history"] = False
+                    st.rerun()
+            else:
+                if ledger_df.empty:
+                    st.info("通知履歴がありません。")
+                else:
+                    line_hist = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["LINE"]].copy()
+                    if line_hist.empty:
+                        st.info("LINE通知履歴はまだありません。")
+                    else:
+                        # フィルター
+                        fl1, fl2, fl3 = st.columns(3)
+                        with fl1:
+                            all_projects = ["すべて"] + sorted(line_hist["Project_Name"].astype(str).unique().tolist())
+                            sel_proj = st.selectbox("プロジェクト", all_projects, key="line_filter_proj")
+                        with fl2:
+                            all_persons = ["すべて"] + sorted(line_hist["PersonName"].astype(str).unique().tolist())
+                            sel_person = st.selectbox("メンバー", all_persons, key="line_filter_person")
+                        with fl3:
+                            disp_count = st.selectbox("表示件数", [20, 50, 100, 200], key="line_filter_count")
+
+                        filtered_line = line_hist.copy()
+                        if sel_proj != "すべて":
+                            filtered_line = filtered_line[filtered_line["Project_Name"].astype(str) == sel_proj]
+                        if sel_person != "すべて":
+                            filtered_line = filtered_line[filtered_line["PersonName"].astype(str) == sel_person]
+
+                        # 送信成功/失敗カウント
+                        note_col = filtered_line["Note"].astype(str) if "Note" in filtered_line.columns else pd.Series([], dtype=str)
+                        ok_count = note_col.str.contains("HTTP:200").sum()
+                        ng_count = len(filtered_line) - ok_count
+                        sm1, sm2, sm3 = st.columns(3)
+                        sm1.metric("送信件数", len(filtered_line))
+                        sm2.metric("✅ 成功", ok_count)
+                        sm3.metric("❌ 失敗/スキップ", ng_count)
+
+                        cols = [c for c in ["Datetime_JST", "Project_Name", "PersonName", "LINE_DisplayName", "Note"] if c in filtered_line.columns]
+                        st.dataframe(
+                            filtered_line.sort_values("Datetime_JST", ascending=False)[cols].head(disp_count),
+                            use_container_width=True, hide_index=True,
+                        )
+
+                        if st.button("🔄 LINE通知履歴をリセット表示", key="line_hist_hide"):
+                            st.session_state["hide_line_history"] = True
+                            st.rerun()
 
     def render_apr(self, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> None:
         st.subheader("📈 APR 確定")
