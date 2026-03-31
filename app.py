@@ -1021,10 +1021,29 @@ class GSheetService:
         ws.update([out.columns.tolist()] + out.values.tolist(), value_input_option="USER_ENTERED")
 
     def append_row(self, key: str, row: List[Any]) -> None:
+        self.append_rows_direct(key, [row])
+
+    def append_rows_direct(self, key: str, rows: List[List[Any]]) -> None:
+        """複数行をバッチで追記。append_rows API が失敗した場合は直接セル更新にフォールバック。"""
+        if not rows:
+            return
+        ws = self.ws(key)
+        clean_rows = [[("" if x is None else x) for x in row] for row in rows]
+        err1: Optional[Exception] = None
         try:
-            self.ws(key).append_row([("" if x is None else x) for x in row], value_input_option="USER_ENTERED")
+            ws.append_rows(clean_rows, value_input_option="USER_ENTERED")
+            return
         except Exception as e:
-            raise RuntimeError(f"{self.actual_name(key)} への追記に失敗しました: {e}")
+            err1 = e
+        # フォールバック: 現在の行数を取得して直接セルに書き込む
+        try:
+            current_len = len(ws.get_all_values())
+            next_row = current_len + 1
+            ws.update(f"A{next_row}", clean_rows, value_input_option="USER_ENTERED")
+        except Exception as e2:
+            raise RuntimeError(
+                f"{self.actual_name(key)} への追記に失敗しました: append_rows={err1} / direct_update={e2}"
+            )
 
     def overwrite_rows(self, key: str, rows: List[List[Any]]) -> None:
         ws = self.ws(key)
@@ -2420,8 +2439,10 @@ class AppUI:
                 if not token:
                     _save_warnings.append(f"LINEトークン未設定 (ns={_ns})。LINE送信をスキップして保存のみ続行。")
 
-                st.write(f"📝 Ledger に書き込み中... (sheet: {self.repo.gs.names.LEDGER})")
-                # Ledger 書き込み & LINE 送信
+                # ── Ledger 行を全メンバー分まとめて収集してから一括書き込み ──
+                _ledger_rows: List[List[Any]] = []
+                _line_send_queue: List[Dict[str, Any]] = []  # LINE送信キュー
+
                 for p in target_projects:
                     _proj_row = settings_df[settings_df["Project_Name"] == str(p)].iloc[0]
                     project_net_factor = float(_proj_row.get("Net_Factor", AppConfig.FACTOR["MASTER"]))
@@ -2443,14 +2464,15 @@ class AppUI:
                             skip_count += 1
                             continue
 
-                        note = (
+                        apr_note = (
                             f"APR:{apr}%, "
                             f"Liquidity:{total_liquidity}, "
                             f"YesterdayProfit:{yesterday_profit}, "
                             f"SourceMode:{source_mode}, "
                             f"Mode:{r['CalcMode']}, Rank:{r['Rank']}, Factor:{r['Factor']}, CompoundTiming:{compound_timing}"
                         )
-                        self.repo.append_ledger(ts, p, person, AppConfig.TYPE["APR"], daily_apr, note, evidence_url or "", uid, disp)
+                        # APR 行を収集
+                        _ledger_rows.append([ts, p, person, AppConfig.TYPE["APR"], daily_apr, apr_note, evidence_url or "", uid, disp, AppConfig.SOURCE["APP"]])
                         existing_apr_keys.add(apr_key)
                         apr_ledger_count += 1
 
@@ -2471,28 +2493,41 @@ class AppUI:
                             f"現在運用額: {U.fmt_usd(current_principal)}\n"
                             f"複利タイプ: {U.compound_label(compound_timing)}\n"
                         )
-
                         if compound_timing == AppConfig.COMPOUND["DAILY"]:
                             personalized_msg += f"複利反映後運用額: {U.fmt_usd(person_after_amount)}\n"
 
-                        if not uid or token is None:
-                            code, line_note = 0, "LINE未送信: Line_User_IDなしまたはトークン未取得"
-                        else:
-                            code = ExternalService.send_line_push(token, uid, personalized_msg, evidence_url)
-                            line_note = (
-                                f"HTTP:{code}, "
-                                f"Liquidity:{total_liquidity}, "
-                                f"YesterdayProfit:{yesterday_profit}, "
-                                f"APR:{apr}%, SourceMode:{source_mode}, CompoundTiming:{compound_timing}"
-                            )
+                        _line_send_queue.append({"p": p, "person": person, "uid": uid, "disp": disp, "msg": personalized_msg})
 
-                        self.repo.append_ledger(ts, p, person, AppConfig.TYPE["LINE"], 0, line_note, evidence_url or "", uid, disp)
-                        line_log_count += 1
+                # ── Ledger に一括書き込み ──
+                st.write(f"📝 Ledger に {len(_ledger_rows)} 行書き込み中... (sheet: {self.repo.gs.names.LEDGER})")
+                if _ledger_rows:
+                    self.repo.gs.append_rows_direct("LEDGER", _ledger_rows)
+                st.write(f"✅ Ledger APR書き込み完了 ({len(_ledger_rows)}行)")
 
-                        if code == 200:
-                            success += 1
-                        else:
-                            fail += 1
+                # ── LINE 送信 & LINE ログ行を収集して一括書き込み ──
+                _line_rows: List[List[Any]] = []
+                for _lq in _line_send_queue:
+                    _p, _person, _uid, _disp, _msg = _lq["p"], _lq["person"], _lq["uid"], _lq["disp"], _lq["msg"]
+                    if not _uid or token is None:
+                        code, line_note = 0, "LINE未送信: Line_User_IDなしまたはトークン未取得"
+                    else:
+                        code = ExternalService.send_line_push(token, _uid, _msg, evidence_url)
+                        line_note = (
+                            f"HTTP:{code}, "
+                            f"Liquidity:{total_liquidity}, "
+                            f"YesterdayProfit:{yesterday_profit}, "
+                            f"APR:{apr}%, SourceMode:{source_mode}"
+                        )
+                    _line_rows.append([ts, _p, _person, AppConfig.TYPE["LINE"], 0, line_note, evidence_url or "", _uid, _disp, AppConfig.SOURCE["APP"]])
+                    line_log_count += 1
+                    if code == 200:
+                        success += 1
+                    else:
+                        fail += 1
+
+                if _line_rows:
+                    self.repo.gs.append_rows_direct("LEDGER", _line_rows)
+                st.write(f"✅ LINE ログ書き込み完了 ({len(_line_rows)}行)")
 
                 if daily_add_map:
                     for _di in range(len(members_df)):
