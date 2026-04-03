@@ -115,6 +115,7 @@ class AppConfig:
             "Admin_Name",
             "Admin_Namespace",
             "Note",
+            "Device_Type",   # "pc" or "mobile" — step3 デバイス判定
         ],
         "USDC_HISTORY": [
             "Unique_Key",
@@ -170,16 +171,22 @@ class AppConfig:
     }
 
     # Default values for SmartVault Mobile configurable boxes (mirrors SMARTVAULT_BOXES_MOBILE)
+    # 上端(Liq)・下端(APR) が読み取れない問題 対応:
+    #   - Top: 0.11、Bottom: 0.30（全ゾーン）
+    #   - 左端ゾーン(Liq)は左端まで拡張、右端ゾーン(APR)は右端まで拡張
     SV_BOX_DEFAULTS: Dict[str, float] = {
-        "SV_Liq_Left": 0.05, "SV_Liq_Top": 0.25, "SV_Liq_Right": 0.40, "SV_Liq_Bottom": 0.34,
-        "SV_Profit_Left": 0.41, "SV_Profit_Top": 0.25, "SV_Profit_Right": 0.69, "SV_Profit_Bottom": 0.34,
-        "SV_APR_Left": 0.70, "SV_APR_Top": 0.25, "SV_APR_Right": 0.93, "SV_APR_Bottom": 0.34,
+        "SV_Liq_Left": 0.02,  "SV_Liq_Top": 0.11,  "SV_Liq_Right": 0.43,  "SV_Liq_Bottom": 0.30,
+        "SV_Profit_Left": 0.40, "SV_Profit_Top": 0.11, "SV_Profit_Right": 0.70, "SV_Profit_Bottom": 0.30,
+        "SV_APR_Left": 0.67,  "SV_APR_Top": 0.11,  "SV_APR_Right": 0.99,  "SV_APR_Bottom": 0.30,
     }
 
-    # Default values for PC 3-zone boxes (liquidity & profit only; APR uses Crop_* columns)
+    # Default values for PC 3-zone boxes
+    # 操作履歴パネル（画面右端 x≈0.79〜1.0）から読み取る構成:
+    #   PC_Liq   : 右パネル上部 「提供した流動性の合計」$XX,XXX → y=0.19〜0.30
+    #   PC_Profit: 右パネル中部〜下部 手数料を回収エントリ（1日前・当日）→ y=0.48〜1.0 末尾の $ 値を採用
     PC_BOX_DEFAULTS: Dict[str, float] = {
-        "PC_Liq_Left": 0.05, "PC_Liq_Top": 0.18, "PC_Liq_Right": 0.38, "PC_Liq_Bottom": 0.32,
-        "PC_Profit_Left": 0.38, "PC_Profit_Top": 0.18, "PC_Profit_Right": 0.68, "PC_Profit_Bottom": 0.32,
+        "PC_Liq_Left": 0.79, "PC_Liq_Top": 0.19, "PC_Liq_Right": 1.0, "PC_Liq_Bottom": 0.30,
+        "PC_Profit_Left": 0.79, "PC_Profit_Top": 0.48, "PC_Profit_Right": 1.0, "PC_Profit_Bottom": 1.0,
     }
 
     # Auto-expand margin when OCR detects nothing (ratio units)
@@ -536,6 +543,61 @@ class U:
         return min(candidates)
 
     @staticmethod
+    def maybe_invert_dark(file_bytes: bytes, threshold: int = 128) -> bytes:
+        """ダークモード画像（平均輝度が threshold 未満）を明暗反転して返す。
+
+        Coinbase / スマートウォレットのダークUI は暗い背景に明るい文字のため、
+        OCR.space が "$" → "±" 等に誤読する。反転することで白背景+黒文字になり精度が上がる。
+        threshold=128: 平均輝度0-255 の中間値。ダークモード画像は通常 80-110 程度のため
+        100 だと境界で反転されない場合がある → 128 に引き上げて確実に反転。
+        輝度計算は 64×64 に縮小してから行うことで高速化（全ピクセル展開を回避）。
+        JPEG保存（quality=90）でファイルサイズを抑え API 送信遅延を防ぐ。
+        """
+        try:
+            img = Image.open(BytesIO(file_bytes)).convert("L")
+            # 64×64 に縮小して輝度計算（フルサイズ展開を避ける）
+            small = img.resize((64, 64), Image.NEAREST)
+            pixels = list(small.getdata())  # 4096 ピクセルのみ
+            mean_brightness = sum(pixels) / 4096
+            if mean_brightness < threshold:
+                inverted = ImageOps.invert(img).convert("RGB")
+                buf = BytesIO()
+                inverted.save(buf, format="JPEG", quality=90)
+                return buf.getvalue()
+        except Exception:
+            pass
+        return file_bytes
+
+    @staticmethod
+    def pick_last_fee_amount(vals: List[float], min_v: float = 1.0, max_v: float = 500_000.0) -> Optional[float]:
+        """操作履歴パネル OCR 用: 手数料を回収エントリの最新（テキスト末尾）$ 値を返す。
+
+        OCR テキストは上→下の順で読まれるため、範囲内の最後の値が
+        最新の「手数料を回収」エントリの金額に対応する。
+        """
+        in_range = [float(v) for v in vals if min_v <= float(v) <= max_v]
+        return in_range[-1] if in_range else None
+
+    @staticmethod
+    def extract_history_datetime(text: str) -> Optional[str]:
+        """操作履歴パネルの OCR テキストから最新の日時文字列を抽出する。
+
+        対応フォーマット:
+          2026/04/03 10:27  →  "2026/04/03 10:27"
+          2026.04.03 10:27  →  "2026/04/03 10:27"
+          2026-04-03 10:27  →  "2026/04/03 10:27"
+        テキスト内に複数ある場合は末尾（最新）を返す。
+        """
+        if not text:
+            return None
+        pattern = r"(\d{4})[\/\.\-](\d{1,2})[\/\.\-](\d{1,2})\s+(\d{1,2}:\d{2})"
+        matches = re.findall(pattern, text)
+        if not matches:
+            return None
+        y, mo, d, hm = matches[-1]  # 末尾 = 最新エントリ
+        return f"{y}/{int(mo):02d}/{int(d):02d} {hm}"
+
+    @staticmethod
     def extract_transaction_rows(text: str) -> List[Dict[str, Any]]:
         """Extract (datetime, date_str, time_str, amount) rows from a USDC transaction
         history OCR text.
@@ -551,11 +613,14 @@ class U:
             return []
 
         norm = re.sub(r"[ \t\u3000]+", " ", text)
+        # ダークモード OCR 誤読の正規化: "±" → "$"、よくある数字化けも補正
+        norm = norm.replace("±", "$").replace("£", "$").replace("§", "$")
 
         # Pattern: <月数>[月 or OCR誤読文字 or 省略]\s*<日> at <HH>:<MM> <am|pm>
-        # [^\d\s]? — 1文字の非数字・非スペース（月・B・Bなど何でも）を許容
+        # \s* を月数字の後にも追加: "4 h 3 at" (月→" h "のように前後スペース付き化け) に対応
+        # [^\d\s]? — 1文字の非数字・非スペース（月・B・h など何でも）を許容
         date_pat = re.compile(
-            r"(\d{1,2})[^\d\s]?\s*(\d{1,2})\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)",
+            r"(\d{1,2})\s*[^\d\s]?\s*(\d{1,2})\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)",
             re.IGNORECASE,
         )
         amount_pat = re.compile(r"\$\s*(\d[\d,]*(?:\.\d+)?)")
@@ -576,13 +641,12 @@ class U:
             chunk_amounts.append(found[0] if found else None)
 
         # ── カラムレイアウト検出：大半のチャンクに金額がなく全金額が末尾にまとまる場合 ──
+        # 日付数より金額数が少ない場合（例: 最後の日付が画像下端で切れている）も
+        # zip の自然な停止に任せて位置合わせを行う（件数一致チェックを除去）
         n_found = sum(1 for a in chunk_amounts if a is not None)
-        use_positional = (
-            n_found <= 1
-            and len(all_amount_matches) >= len(date_matches)
-        )
+        use_positional = (n_found <= 1 and len(all_amount_matches) >= 1)
         if use_positional:
-            # i番目の日付 → i番目の金額（カラム順一致）
+            # i番目の日付 → i番目の金額（カラム順一致）。金額が足りない分は None
             pos_amounts = [m.group(1) for m in all_amount_matches]
             final_amounts: List[Optional[str]] = (
                 pos_amounts[: len(date_matches)]
@@ -673,6 +737,53 @@ class U:
         if same(ocr_liquidity, final_liquidity) and same(ocr_profit, final_profit) and same(ocr_apr, final_apr):
             return "ocr"
         return "ocr+manual"
+
+    @staticmethod
+    def calc_combined_apr(today_df: "pd.DataFrame", pc_factor: float = 0.66) -> "Tuple[Optional[float], str]":
+        """ステップ6・7: 本日のSmartVault_Historyエントリから合算APRを算出する。
+
+        ルール:
+        - モバイルエントリが1件でもあれば → モバイルAPRの平均を採用
+        - PCエントリのみ → PC APR平均 × pc_factor（デフォルト0.66）
+        - データなし → (None, "本日のデータなし")
+        """
+        if today_df is None or today_df.empty:
+            return None, "本日のデータなし"
+
+        df = today_df.copy()
+        df["APR"] = U.to_num_series(df["APR"])
+
+        if "Device_Type" in df.columns:
+            mobile_mask = df["Device_Type"].astype(str).str.strip().str.lower().isin(["mobile", "モバイル"])
+            pc_mask = df["Device_Type"].astype(str).str.strip().str.lower() == "pc"
+            mobile_df = df[mobile_mask]
+            pc_df = df[pc_mask]
+        else:
+            mobile_df = pd.DataFrame()
+            pc_df = df
+
+        if not mobile_df.empty:
+            mobile_avg = float(mobile_df["APR"].mean())
+            if not pc_df.empty:
+                pc_avg = float(pc_df["APR"].mean())
+                expl = (
+                    f"📱モバイル平均 {mobile_avg:.4f}% ／ 🖥️PC平均 {pc_avg:.4f}%"
+                    f" → モバイル値を採用"
+                )
+            else:
+                expl = f"📱モバイル平均 {mobile_avg:.4f}%"
+            return mobile_avg, expl
+        elif not pc_df.empty:
+            pc_avg = float(pc_df["APR"].mean())
+            combined = pc_avg * pc_factor
+            expl = (
+                f"🖥️PC平均 {pc_avg:.4f}% × {pc_factor:.0%}（PC専用補正）"
+                f" = {combined:.4f}%"
+            )
+            return combined, expl
+        else:
+            avg = float(df["APR"].mean())
+            return avg, f"全エントリ平均（デバイス情報なし）: {avg:.4f}%"
 
 
 # =========================================================
@@ -841,7 +952,7 @@ class ExternalService:
                         "detectOrientation": True,
                         "isTable": False,
                     },
-                    timeout=30,
+                    timeout=15,
                 )
                 # JSON以外のレスポンス（プレーンテキストエラーなど）に対応
                 try:
@@ -883,26 +994,31 @@ class ExternalService:
             )
 
             if fast:
-                # ── 高速モード: engine=1 のみ・前処理なし（USDC全画面OCR用）──
-                # API呼び出し: jpn=1回 + engフォールバック=1回 = 最大2回
+                # ── 高速モード: engine=1 のみ・前処理なし ──
                 txt = _call_ocr("cropped.png", cropped_bytes, 1)
                 if txt:
                     return txt
             else:
-                # ── 通常モード: まず元画像×エンジン2→1を試し、取れたら即返す ──
+                # ── 通常モード: engine=2→1 の順に試す ──
                 for engine in (2, 1):
                     txt = _call_ocr("cropped.png", cropped_bytes, engine)
                     if txt:
                         return txt
 
-                # ── フォールバック: 前処理バリアント1枚のみ追加試行 ──
-                processed_list = U.preprocess_ocr_image(cropped_bytes)
-                if processed_list:
-                    fallback_bytes = processed_list[0]
-                    for engine in (2, 1):
-                        txt = _call_ocr("processed_0.png", fallback_bytes, engine)
-                        if txt:
-                            return txt
+                # ── フォールバック: 2×拡大+コントラスト強調（JPEG）で再試行 ──
+                try:
+                    _fb_img = Image.open(BytesIO(cropped_bytes)).convert("L")
+                    _fb_img = ImageOps.autocontrast(_fb_img)
+                    _fb_img = ImageEnhance.Contrast(_fb_img).enhance(3.0)
+                    _fb_img = _fb_img.resize((_fb_img.width * 2, _fb_img.height * 2))
+                    _fb_buf = BytesIO()
+                    _fb_img.save(_fb_buf, format="JPEG", quality=90)
+                    fb_bytes = _fb_buf.getvalue()
+                    txt = _call_ocr("enhanced.jpg", fb_bytes, 2)
+                    if txt:
+                        return txt
+                except Exception:
+                    pass
 
             # テキストが取れなかった場合はAPIエラーを返す
             if api_errors:
@@ -953,11 +1069,18 @@ class GSheetService:
             dict(creds_info),
             scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
         )
+        self.creds = creds  # Drive アップロードで再利用
         self.gc = gspread.authorize(creds)
         self.book = self.gc.open_by_key(self.spreadsheet_id)
 
+        # ヘッダー定義が変わったら（列追加など）必ず再実行されるよう、
+        # ヘッダー内容のハッシュを key に含める
+        import hashlib as _hashlib, json as _json
+        _headers_sig = _hashlib.md5(
+            _json.dumps(AppConfig.HEADERS, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()[:10]
         ensure_key = (
-            f"_sheet_ensured_{self.names.SETTINGS}_{self.names.MEMBERS}_{self.names.LEDGER}_"
+            f"_sheet_ensured_{_headers_sig}_{self.names.SETTINGS}_{self.names.MEMBERS}_{self.names.LEDGER}_"
             f"{self.names.LINEUSERS}_{self.names.APR_SUMMARY}_{self.names.SMARTVAULT_HISTORY}_"
             f"{self.names.USDC_HISTORY}"
         )
@@ -998,7 +1121,14 @@ class GSheetService:
         colset = [str(c).strip() for c in first if str(c).strip()]
         missing = [h for h in headers if h not in colset]
         if missing:
-            ws.update("1:1", [colset + missing])
+            try:
+                # update() の引数順は gspread バージョンによって異なるため、
+                # 互換性の高い update_cell を1セルずつ書き込む
+                for _i, _h in enumerate(missing):
+                    ws.update_cell(1, len(colset) + 1 + _i, _h)
+            except Exception:
+                # ヘッダー追加失敗は警告扱い（アプリ起動はブロックしない）
+                pass
 
     @st.cache_data(ttl=600)
     def load_df(_self, key: str) -> pd.DataFrame:
@@ -1021,29 +1151,10 @@ class GSheetService:
         ws.update([out.columns.tolist()] + out.values.tolist(), value_input_option="USER_ENTERED")
 
     def append_row(self, key: str, row: List[Any]) -> None:
-        self.append_rows_direct(key, [row])
-
-    def append_rows_direct(self, key: str, rows: List[List[Any]]) -> None:
-        """複数行をバッチで追記。append_rows API が失敗した場合は直接セル更新にフォールバック。"""
-        if not rows:
-            return
-        ws = self.ws(key)
-        clean_rows = [[("" if x is None else x) for x in row] for row in rows]
-        err1: Optional[Exception] = None
         try:
-            ws.append_rows(clean_rows, value_input_option="USER_ENTERED")
-            return
+            self.ws(key).append_row([("" if x is None else x) for x in row], value_input_option="USER_ENTERED")
         except Exception as e:
-            err1 = e
-        # フォールバック: 現在の行数を取得して直接セルに書き込む
-        try:
-            current_len = len(ws.get_all_values())
-            next_row = current_len + 1
-            ws.update(f"A{next_row}", clean_rows, value_input_option="USER_ENTERED")
-        except Exception as e2:
-            raise RuntimeError(
-                f"{self.actual_name(key)} への追記に失敗しました: append_rows={err1} / direct_update={e2}"
-            )
+            raise RuntimeError(f"{self.actual_name(key)} への追記に失敗しました: {e}")
 
     def overwrite_rows(self, key: str, rows: List[List[Any]]) -> None:
         ws = self.ws(key)
@@ -1052,6 +1163,63 @@ class GSheetService:
 
     def clear_cache(self) -> None:
         st.cache_data.clear()
+
+    def upload_image_to_drive(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        mime_type: str = "image/jpeg",
+    ) -> Optional[str]:
+        """画像を Google Drive にアップロードして公開 URL を返す。
+        失敗時は None を返す（アプリの動作は継続）。
+        """
+        try:
+            import json as _json
+            from google.auth.transport.requests import Request as _GReq
+
+            # アクセストークンを更新
+            if not self.creds.valid:
+                self.creds.refresh(_GReq())
+            token = self.creds.token
+
+            # ── マルチパートアップロード ──────────────────────────────────
+            boundary = "===APRUploadBoundary==="
+            meta = _json.dumps({"name": filename, "mimeType": mime_type})
+            body = (
+                f"--{boundary}\r\n"
+                f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                f"{meta}\r\n"
+                f"--{boundary}\r\n"
+                f"Content-Type: {mime_type}\r\n\r\n"
+            ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--".encode("utf-8")
+
+            upload_resp = requests.post(
+                "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": f"multipart/related; boundary={boundary}",
+                },
+                data=body,
+                timeout=60,
+            )
+            upload_resp.raise_for_status()
+            file_id = upload_resp.json()["id"]
+
+            # ── 誰でも閲覧できるよう公開設定 ──────────────────────────────
+            requests.post(
+                f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={"role": "reader", "type": "anyone"},
+                timeout=15,
+            )
+
+            # スプレッドシートの =IMAGE() で直接表示できる URL
+            return f"https://drive.google.com/uc?export=view&id={file_id}"
+        except Exception:
+            return None
 
 
 # =========================================================
@@ -1370,6 +1538,7 @@ class Repository:
         admin_name: str,
         admin_namespace: str,
         note: str = "",
+        device_type: str = "",  # ステップ3: "pc" or "mobile"
     ) -> None:
         self.gs.append_row(
             "SMARTVAULT_HISTORY",
@@ -1387,6 +1556,7 @@ class Repository:
                 admin_name or "",
                 admin_namespace or "",
                 note or "",
+                str(device_type),  # Device_Type 列
             ],
         )
 
@@ -1400,21 +1570,19 @@ class Repository:
     ) -> Tuple[int, int]:
         """Write USDC transaction history rows (from OCR) to USDC_History sheet.
 
-        重複チェックキー: (Source_Project, OCR_Raw_Text[=datetime_jst], Amount_USD)
-        OCRパース済みの datetime_jst ("2026-03-29 10:44:00" 形式) を使うことで
-        日付表記の揺れ（"3月29日" vs "3/29" 等）に左右されない安定した重複検出を実現。
+        Skips rows that already exist (duplicate = Source_Project + Date_Label + Time_Label + Amount_USD).
         Returns (written_count, skipped_count).
         """
-        # 既存行から重複チェックキーセットを構築
-        # キー = (Source_Project, datetime_jst, Amount_USD)
-        existing_keys: Set[Tuple[str, str, str]] = set()
+        # Load existing rows to build duplicate key set
+        existing_keys: Set[Tuple[str, str, str, str]] = set()
         try:
             existing_df = self.gs.load_df("USDC_HISTORY")
             if not existing_df.empty:
                 for _, ex in existing_df.iterrows():
                     key = (
                         str(ex.get("Source_Project", "")).strip(),
-                        str(ex.get("OCR_Raw_Text", "")).strip(),   # datetime_jst を格納済み
+                        str(ex.get("Date_Label", "")).strip(),
+                        str(ex.get("Time_Label", "")).strip(),
                         str(ex.get("Amount_USD", "")).strip(),
                     )
                     existing_keys.add(key)
@@ -1424,20 +1592,19 @@ class Repository:
         created_at = U.fmt_dt(U.now_jst())
         written, skipped = 0, 0
         for r in rows:
-            date_label  = str(r.get("date_str", "")).strip()       # 例: "3月29日"
-            time_label  = str(r.get("time_str", "")).strip()       # 例: "10:44 am"
-            datetime_jst = str(r.get("datetime_jst", "")).strip()  # 例: "2026-03-29 10:44:00"
-            amount_usd  = float(r.get("amount", 0.0))
-
-            # datetime_jst が取れていない場合は date_label + time_label で代用
-            dedup_dt = datetime_jst if datetime_jst else f"{date_label} {time_label}"
-            key = (str(project).strip(), dedup_dt, str(amount_usd).strip())
-
+            date_label = str(r.get("date_str", "")).strip()
+            time_label = str(r.get("time_str", "")).strip()
+            amount_usd = float(r.get("amount", 0.0))
+            key = (
+                str(project).strip(),
+                date_label,
+                time_label,
+                str(amount_usd).strip(),
+            )
             if key in existing_keys:
                 skipped += 1
                 continue
-
-            unique_key = f"{str(project).strip()}_{dedup_dt}_{amount_usd}"
+            unique_key = f"{str(project).strip()}_{date_label}_{time_label}_{amount_usd}"
             self.gs.append_row(
                 "USDC_HISTORY",
                 [
@@ -1446,12 +1613,12 @@ class Repository:
                     time_label,
                     "received",
                     amount_usd,
-                    amount_usd,    # Token_Amount（USDC は 1:1）
+                    amount_usd,   # Token_Amount（USDC は 1:1）
                     "USDC",
-                    note or "",    # Source_Image
-                    str(project),  # Source_Project
-                    dedup_dt,      # OCR_Raw_Text に OCRパース済み datetime を記録
-                    created_at,    # CreatedAt_JST
+                    note or "",   # Source_Image（証跡URLがあれば）
+                    str(project),
+                    r.get("datetime_jst", ""),  # OCR_Raw_Text の代わりに datetime を格納
+                    created_at,
                 ],
             )
             existing_keys.add(key)  # 同一実行内の重複も防ぐ
@@ -1476,6 +1643,20 @@ class Repository:
         df = df[df["Line_User_ID"] != ""]
         dup = df[df.duplicated(subset=["Line_User_ID"], keep=False)]
         return None if dup.empty else f"同一プロジェクト内で Line_User_ID が重複しています: {dup['Line_User_ID'].unique().tolist()}"
+
+    def load_today_smartvault_history(self, date_jst: str, project: str) -> "pd.DataFrame":
+        """ステップ5: 本日のSmartVault_Historyエントリを取得する（日次積み上げ確認用）。"""
+        try:
+            df = self.gs.load_df("SMARTVAULT_HISTORY")
+            if df.empty:
+                return pd.DataFrame()
+            mask = (
+                df["Datetime_JST"].astype(str).str.startswith(str(date_jst))
+                & (df["Project_Name"].astype(str).str.strip() == str(project).strip())
+            )
+            return df[mask].copy()
+        except Exception:
+            return pd.DataFrame()
 
     def existing_apr_keys_for_date(self, date_jst: str) -> Set[Tuple[str, str]]:
         ledger_df = self.load_ledger()
@@ -1736,6 +1917,7 @@ class AppUI:
         back to the hardcoded defaults.  If a value is not detected on the first
         pass, the corresponding box is automatically expanded by
         ``AppConfig.OCR_EXPAND_MARGIN`` and retried once.
+        fast=True（engine=1 のみ）で API コール数を最小限に抑える。
         """
         boxes = self._build_sv_boxes(srow)
         margin = AppConfig.OCR_EXPAND_MARGIN
@@ -1835,8 +2017,10 @@ class AppUI:
         profit_vals = U.extract_usd_candidates(profit_text)
         apr_vals = U.extract_percent_candidates(apr_text)
 
+        # 流動性: 最大値（提供した流動性の合計）
         total_liquidity = U.pick_total_liquidity(liq_vals)
-        yesterday_profit = U.pick_yesterday_profit(profit_vals)
+        # 昨日の収益: 操作履歴の最新「手数料を回収」= テキスト末尾の $ 値
+        yesterday_profit = U.pick_last_fee_amount(profit_vals)
         apr_value = apr_vals[0] if apr_vals else None
 
         if total_liquidity is None:
@@ -1850,7 +2034,7 @@ class AppUI:
         if yesterday_profit is None:
             retry_text = self._ocr_crop_text(file_bytes, self._expand_box(boxes["YESTERDAY_PROFIT"], margin))
             retry_vals = U.extract_usd_candidates(retry_text)
-            yesterday_profit = U.pick_yesterday_profit(retry_vals) or yesterday_profit
+            yesterday_profit = U.pick_last_fee_amount(retry_vals) or yesterday_profit
             if retry_vals:
                 profit_text += f"\n[retry] {retry_text}"
                 profit_vals = retry_vals
@@ -1865,6 +2049,9 @@ class AppUI:
 
         boxed_preview = U.draw_ocr_boxes(file_bytes, boxes)
 
+        # 操作履歴パネルの profit テキストから日時を抽出（PC 用）
+        history_datetime = U.extract_history_datetime(profit_text)
+
         return {
             "boxes": boxes,
             "liq_text": liq_text,
@@ -1876,25 +2063,34 @@ class AppUI:
             "total_liquidity": total_liquidity,
             "yesterday_profit": yesterday_profit,
             "apr_value": apr_value,
+            "history_datetime": history_datetime,  # 最新手数料を回収の日時
             "boxed_preview": boxed_preview,
         }
 
-    def _ocr_usdc_history(self, file_bytes: bytes) -> Dict[str, Any]:
+    def _ocr_usdc_history(self, file_bytes: bytes, fast: bool = False) -> Dict[str, Any]:
         """OCR a full USDC transaction history screenshot and return all extracted rows.
 
-        Uses Japanese OCR (jpn) so that month characters like '月' are correctly read.
-        Falls back to English OCR if the Japanese result yields no rows.
+        fast=True : 上半分のみ・反転なし・eng engine=1 の1コール（画面タイプ判定専用）
+        fast=False: 全体・ダークモード反転あり・jpn→eng の順で精度重視
         """
+        if fast:
+            # 早期判定: 上半分だけ・反転なし・1コールのみ（小さい画像で高速）
+            top_box = {"left": 0.0, "top": 0.05, "right": 1.0, "bottom": 0.50}
+            raw_text = self._ocr_crop_text(file_bytes, top_box, language="eng", fast=True)
+            rows = U.extract_transaction_rows(raw_text)
+            return {"raw_text": raw_text, "rows": rows}
+
+        # 確定読み取り: ダークモード対策で反転してから全体OCR
+        ocr_bytes = U.maybe_invert_dark(file_bytes)
         full_box = {"left": 0.0, "top": 0.05, "right": 1.0, "bottom": 0.98}
 
-        # First try: Japanese OCR — engine=2(Tesseract)優先で「月」を正確に読む
-        # fast=False にすることで engine=2→1 の順で試行（月の文字化け防止）
-        raw_text = self._ocr_crop_text(file_bytes, full_box, language="jpn", fast=False)
+        # First try: Japanese OCR — engine=1（jpn）で「月」を正確に読む
+        raw_text = self._ocr_crop_text(ocr_bytes, full_box, language="jpn", fast=True)
         rows = U.extract_transaction_rows(raw_text)
 
-        # Fallback: English OCR — 月が欠落していてもregexで許容するのでfast=True(1コール)で十分
+        # Fallback: English OCR
         if not rows:
-            raw_text_eng = self._ocr_crop_text(file_bytes, full_box, language="eng", fast=True)
+            raw_text_eng = self._ocr_crop_text(ocr_bytes, full_box, language="eng", fast=True)
             rows = U.extract_transaction_rows(raw_text_eng)
             if rows:
                 raw_text = raw_text_eng
@@ -1902,212 +2098,83 @@ class AppUI:
         return {"raw_text": raw_text, "rows": rows}
 
     def render_dashboard(self, members_df: pd.DataFrame, ledger_df: pd.DataFrame, apr_summary_df: pd.DataFrame) -> None:
-        now = U.now_jst()
-        st.markdown(
-            f"## 📊 ダッシュボード"
-            f"<span style='float:right;font-size:0.8em;color:#888;line-height:2.5'>{now.strftime('%Y/%m/%d %H:%M')} JST</span>",
-            unsafe_allow_html=True,
-        )
+        st.subheader("📊 管理画面ダッシュボード")
+        st.caption("総資産 / 本日APR / グループ別残高 / 個人残高 / 個人別累計APR / LINE通知履歴")
 
-        # ── 基本集計 ──
-        active_mem = members_df[members_df["IsActive"] == True].copy() if not members_df.empty else pd.DataFrame()
+        active_mem = members_df[members_df["IsActive"] == True].copy() if not members_df.empty else members_df.copy()
         total_assets = float(active_mem["Principal"].sum()) if not active_mem.empty else 0.0
-        member_count = len(active_mem)
 
-        today_prefix = U.fmt_date(now)
-        yesterday_prefix = U.fmt_date(now - timedelta(days=1))
-        today_apr, yesterday_apr, total_apr_paid = 0.0, 0.0, 0.0
-
+        today_prefix, today_apr = U.fmt_date(U.now_jst()), 0.0
         if not ledger_df.empty and "Datetime_JST" in ledger_df.columns:
-            apr_rows = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"]].copy()
-            apr_rows["Amount"] = U.to_num_series(apr_rows["Amount"])
-            today_apr = float(apr_rows[apr_rows["Datetime_JST"].astype(str).str.startswith(today_prefix)]["Amount"].sum())
-            yesterday_apr = float(apr_rows[apr_rows["Datetime_JST"].astype(str).str.startswith(yesterday_prefix)]["Amount"].sum())
-            total_apr_paid = float(apr_rows["Amount"].sum())
+            today_rows = ledger_df[ledger_df["Datetime_JST"].astype(str).str.startswith(today_prefix)].copy()
+            today_apr = float(today_rows[today_rows["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"]]["Amount"].sum())
 
-        today_delta = today_apr - yesterday_apr
-
-        # ── サマリーカード 4列 ──
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("💰 総資産", U.fmt_usd(total_assets))
-        mc2.metric("📈 本日APR", U.fmt_usd(today_apr), delta=f"{'+' if today_delta >= 0 else ''}{today_delta:,.2f} vs 昨日")
-        mc3.metric("👥 運用中メンバー", f"{member_count} 名")
-        mc4.metric("💵 累計APR支払い", U.fmt_usd(total_apr_paid))
+        c1, c2 = st.columns(2)
+        c1.metric("総資産", U.fmt_usd(total_assets))
+        c2.metric("本日APR", U.fmt_usd(today_apr))
 
         st.divider()
+        c3, c4 = st.columns(2)
 
-        # ── タブ ──
-        tab_asset, tab_apr, tab_line = st.tabs(["💼 資産状況", "📈 APR推移", "📩 LINE通知履歴"])
-
-        # ════════════════════════════════════════
-        # TAB 1 — 資産状況
-        # ════════════════════════════════════════
-        with tab_asset:
-            col_l, col_r = st.columns([3, 2])
-
-            with col_l:
-                st.markdown("##### 👤 個人別運用残高")
-                personal_df = active_mem[active_mem["Project_Name"].astype(str).str.upper() == AppConfig.PROJECT["PERSONAL"]].copy() if not active_mem.empty else pd.DataFrame()
-                if personal_df.empty:
-                    st.info("PERSONAL データがありません。")
-                else:
-                    p = personal_df[["PersonName", "Principal"]].copy()
-                    p["Principal"] = p["Principal"].astype(float)
-                    p = p.sort_values("Principal", ascending=False)
-                    # バーチャート
-                    chart_df = p.set_index("PersonName")["Principal"]
-                    st.bar_chart(chart_df, use_container_width=True)
-
-            with col_r:
-                st.markdown("##### 📋 残高一覧")
-                if not personal_df.empty:
-                    disp = personal_df[["PersonName", "Principal", "LINE_DisplayName"]].copy()
-                    disp["割合"] = disp["Principal"].astype(float).map(
-                        lambda x: f"{x / total_assets * 100:.1f}%" if total_assets > 0 else "—"
-                    )
-                    disp["残高"] = disp["Principal"].astype(float).apply(U.fmt_usd)
-                    disp = disp.sort_values("Principal", ascending=False)[["PersonName", "残高", "割合"]]
-                    st.dataframe(disp, use_container_width=True, hide_index=True)
-
-            st.divider()
-
-            col_g1, col_g2 = st.columns(2)
-            with col_g1:
-                st.markdown("##### 🏢 グループ別残高")
-                group_df = active_mem[active_mem["Project_Name"].astype(str).str.upper() != AppConfig.PROJECT["PERSONAL"]].copy() if not active_mem.empty else pd.DataFrame()
-                if group_df.empty:
-                    st.info("グループデータがありません。")
-                else:
-                    gs = group_df.groupby("Project_Name", as_index=False).agg(
-                        人数=("PersonName", "count"), 総残高=("Principal", "sum")
-                    ).sort_values("総残高", ascending=False)
-                    gs["総残高表示"] = gs["総残高"].apply(U.fmt_usd)
-                    st.dataframe(gs[["Project_Name", "人数", "総残高表示"]].rename(columns={"総残高表示": "総残高"}), use_container_width=True, hide_index=True)
-
-            with col_g2:
-                st.markdown("##### 🏆 累計APR ランキング")
-                if apr_summary_df.empty:
-                    st.info("APR履歴がありません。")
-                else:
-                    rank = apr_summary_df.copy()
-                    rank["Total_APR_num"] = U.to_num_series(rank["Total_APR"])
-                    rank = rank.sort_values("Total_APR_num", ascending=False).reset_index(drop=True)
-                    rank.index = rank.index + 1
-                    rank["累計APR"] = rank["Total_APR_num"].apply(U.fmt_usd)
-                    rank["件数"] = rank["APR_Count"].astype(str)
-                    rank["総資産比"] = rank["Asset_Ratio"]
-                    st.dataframe(rank[["PersonName", "累計APR", "件数", "総資産比"]], use_container_width=True)
-
-        # ════════════════════════════════════════
-        # TAB 2 — APR推移
-        # ════════════════════════════════════════
-        with tab_apr:
-            if ledger_df.empty or "Datetime_JST" not in ledger_df.columns:
-                st.info("APR履歴がありません。")
+        with c3:
+            st.markdown("#### グループ別残高")
+            group_df = active_mem[active_mem["Project_Name"].astype(str).str.upper() != AppConfig.PROJECT["PERSONAL"]].copy() if not active_mem.empty else pd.DataFrame()
+            if group_df.empty:
+                st.info("グループデータがありません。")
             else:
-                apr_hist = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"]].copy()
-                apr_hist["Amount"] = U.to_num_series(apr_hist["Amount"])
-                apr_hist["Date"] = apr_hist["Datetime_JST"].astype(str).str[:10]
+                group_summary = group_df.groupby("Project_Name", as_index=False).agg(人数=("PersonName", "count"), 総残高=("Principal", "sum")).sort_values("総残高", ascending=False)
+                group_summary["総残高"] = group_summary["総残高"].apply(U.fmt_usd)
+                st.dataframe(group_summary, use_container_width=True, hide_index=True)
 
-                if apr_hist.empty:
-                    st.info("APR記録がありません。")
-                else:
-                    # 期間フィルター
-                    days_opt = st.radio("表示期間", ["直近7日", "直近30日", "直近90日", "全期間"], horizontal=True, index=1)
-                    days_map = {"直近7日": 7, "直近30日": 30, "直近90日": 90, "全期間": 9999}
-                    cutoff = (now - timedelta(days=days_map[days_opt])).strftime("%Y-%m-%d")
-                    filtered = apr_hist[apr_hist["Date"] >= cutoff].copy()
-
-                    # 日別合計
-                    daily = filtered.groupby("Date")["Amount"].sum().reset_index().sort_values("Date")
-                    daily.columns = ["日付", "APR合計"]
-
-                    col_ch1, col_ch2 = st.columns([3, 1])
-                    with col_ch1:
-                        st.markdown("##### 📅 日別 APR 合計")
-                        st.line_chart(daily.set_index("日付")["APR合計"], use_container_width=True)
-                    with col_ch2:
-                        st.markdown("##### 📊 統計")
-                        st.metric("平均日次APR", U.fmt_usd(float(daily["APR合計"].mean()) if not daily.empty else 0))
-                        st.metric("最大日次APR", U.fmt_usd(float(daily["APR合計"].max()) if not daily.empty else 0))
-                        st.metric("記録日数", f"{len(daily)} 日")
-
-                    st.divider()
-
-                    # 個人別 APR 推移
-                    st.markdown("##### 👤 個人別 APR 推移")
-                    persons = sorted(filtered["PersonName"].astype(str).unique().tolist())
-                    sel_persons = st.multiselect("メンバー選択", persons, default=persons)
-                    if sel_persons:
-                        pivot = (
-                            filtered[filtered["PersonName"].astype(str).isin(sel_persons)]
-                            .groupby(["Date", "PersonName"])["Amount"]
-                            .sum()
-                            .unstack("PersonName")
-                            .fillna(0)
-                        )
-                        pivot.index.name = "日付"
-                        st.line_chart(pivot, use_container_width=True)
-
-                    st.divider()
-                    with st.expander("📋 APR 詳細テーブル", expanded=False):
-                        detail = filtered.copy()
-                        show_cols = [c for c in ["Datetime_JST", "Project_Name", "PersonName", "Amount", "Note"] if c in detail.columns]
-                        detail["Amount"] = detail["Amount"].apply(U.fmt_usd)
-                        st.dataframe(detail.sort_values("Datetime_JST", ascending=False)[show_cols].head(200), use_container_width=True, hide_index=True)
-
-        # ════════════════════════════════════════
-        # TAB 3 — LINE通知履歴
-        # ════════════════════════════════════════
-        with tab_line:
-            if st.session_state.get("hide_line_history", False):
-                st.info("LINE通知履歴はリセット表示中です。シートの記録は削除していません。")
-                if st.button("📋 LINE通知履歴を再表示", key="line_hist_show"):
-                    st.session_state["hide_line_history"] = False
-                    st.rerun()
+        with c4:
+            st.markdown("#### 個人残高")
+            personal_df = active_mem[active_mem["Project_Name"].astype(str).str.upper() == AppConfig.PROJECT["PERSONAL"]].copy() if not active_mem.empty else pd.DataFrame()
+            if personal_df.empty:
+                st.info("PERSONAL データがありません。")
             else:
-                if ledger_df.empty:
-                    st.info("通知履歴がありません。")
+                p = personal_df[["PersonName", "Principal", "LINE_DisplayName"]].copy()
+                p["資産割合"] = p["Principal"].map(lambda x: f"{(float(x) / total_assets) * 100:.2f}%" if total_assets > 0 else "0.00%")
+                p["Principal_num"] = p["Principal"].astype(float)
+                p["Principal"] = p["Principal"].apply(U.fmt_usd)
+                p = p.sort_values("Principal_num", ascending=False)[["PersonName", "Principal", "資産割合", "LINE_DisplayName"]]
+                st.dataframe(p, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("#### 個人別 累計APR")
+        if apr_summary_df.empty:
+            st.info("APR履歴がありません。")
+        else:
+            view = apr_summary_df.copy()
+            view["Total_APR_num"] = U.to_num_series(view["Total_APR"])
+            view["Total_APR"] = view["Total_APR_num"].apply(U.fmt_usd)
+            view = view.sort_values("Total_APR_num", ascending=False)[["PersonName", "Total_APR", "APR_Count", "Asset_Ratio", "LINE_DisplayName"]]
+            view = view.rename(columns={"Total_APR": "累計APR", "APR_Count": "件数", "Asset_Ratio": "総資産比"})
+            st.dataframe(view, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("#### LINE通知履歴")
+        c_hist1, c_hist2 = st.columns([1, 1])
+        with c_hist1:
+            if st.button("LINE送信履歴をリセット表示", use_container_width=True):
+                st.session_state["hide_line_history"] = True
+                st.rerun()
+        with c_hist2:
+            if st.button("LINE送信履歴を再表示", use_container_width=True):
+                st.session_state["hide_line_history"] = False
+                st.rerun()
+
+        if st.session_state.get("hide_line_history", False):
+            st.info("LINE通知履歴はリセット表示中です。シートの記録は削除していません。")
+        else:
+            if ledger_df.empty:
+                st.info("通知履歴がありません。")
+            else:
+                line_hist = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["LINE"]].copy()
+                if line_hist.empty:
+                    st.info("LINE通知履歴はまだありません。")
                 else:
-                    line_hist = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["LINE"]].copy()
-                    if line_hist.empty:
-                        st.info("LINE通知履歴はまだありません。")
-                    else:
-                        # フィルター
-                        fl1, fl2, fl3 = st.columns(3)
-                        with fl1:
-                            all_projects = ["すべて"] + sorted(line_hist["Project_Name"].astype(str).unique().tolist())
-                            sel_proj = st.selectbox("プロジェクト", all_projects, key="line_filter_proj")
-                        with fl2:
-                            all_persons = ["すべて"] + sorted(line_hist["PersonName"].astype(str).unique().tolist())
-                            sel_person = st.selectbox("メンバー", all_persons, key="line_filter_person")
-                        with fl3:
-                            disp_count = st.selectbox("表示件数", [20, 50, 100, 200], key="line_filter_count")
-
-                        filtered_line = line_hist.copy()
-                        if sel_proj != "すべて":
-                            filtered_line = filtered_line[filtered_line["Project_Name"].astype(str) == sel_proj]
-                        if sel_person != "すべて":
-                            filtered_line = filtered_line[filtered_line["PersonName"].astype(str) == sel_person]
-
-                        # 送信成功/失敗カウント
-                        note_col = filtered_line["Note"].astype(str) if "Note" in filtered_line.columns else pd.Series([], dtype=str)
-                        ok_count = note_col.str.contains("HTTP:200").sum()
-                        ng_count = len(filtered_line) - ok_count
-                        sm1, sm2, sm3 = st.columns(3)
-                        sm1.metric("送信件数", len(filtered_line))
-                        sm2.metric("✅ 成功", ok_count)
-                        sm3.metric("❌ 失敗/スキップ", ng_count)
-
-                        cols = [c for c in ["Datetime_JST", "Project_Name", "PersonName", "LINE_DisplayName", "Note"] if c in filtered_line.columns]
-                        st.dataframe(
-                            filtered_line.sort_values("Datetime_JST", ascending=False)[cols].head(disp_count),
-                            use_container_width=True, hide_index=True,
-                        )
-
-                        if st.button("🔄 LINE通知履歴をリセット表示", key="line_hist_hide"):
-                            st.session_state["hide_line_history"] = True
-                            st.rerun()
+                    cols = [c for c in ["Datetime_JST", "Project_Name", "PersonName", "Type", "Line_User_ID", "LINE_DisplayName", "Note", "Source"] if c in line_hist.columns]
+                    st.dataframe(line_hist.sort_values("Datetime_JST", ascending=False)[cols].head(100), use_container_width=True, hide_index=True)
 
     def render_apr(self, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> None:
         st.subheader("📈 APR 確定")
@@ -2220,6 +2287,9 @@ class AppUI:
                 pass
 
             img_type_label = "📱 モバイル" if is_mobile else "🖥️ PC"
+            # ステップ2・3: 時刻取得とデバイス種別をsession_stateに保存
+            st.session_state["_detected_device_type"] = "mobile" if is_mobile else "pc"
+            st.session_state["_detected_device_time"] = U.fmt_dt(U.now_jst())
             st.caption(f"🔍 OCR実行中… 画像タイプ: {img_type_label}")
 
             _ocr_got_any = False  # Track if at least one value was detected
@@ -2227,31 +2297,17 @@ class AppUI:
 
             with st.spinner("OCR処理中... しばらくお待ちください"):
                 if is_mobile:
-                    # ── モバイル: USDC取引履歴を先に1回試す（高速化） ──
-                    _usdc_early = self._ocr_usdc_history(file_bytes)
-                    if _usdc_early.get("rows"):
-                        # USDC取引履歴と判断 → SmartVaultゾーンOCRをスキップ
-                        liq_val = profit_val = apr_val = None
-                        boxes = AppUI._build_sv_boxes(srow_obj)
-                        texts = {"流動性": "", "昨日の収益": "", "APR": ""}
-                        result = {
-                            "boxed_preview": U.draw_ocr_boxes(file_bytes, boxes),
-                            "boxes": boxes,
-                            "total_text": "", "profit_text": "", "apr_text": "",
-                            "total_liquidity": None, "yesterday_profit": None, "apr_value": None,
-                        }
-                    else:
-                        # USDC行なし → SmartVaultサマリーとして読む
-                        result = self._ocr_smartvault_mobile_metrics(file_bytes, srow=srow_obj)
-                        liq_val    = result["total_liquidity"]
-                        profit_val = result["yesterday_profit"]
-                        apr_val    = result["apr_value"]
-                        boxes      = result["boxes"]
-                        texts      = {
-                            "流動性":     result["total_text"],
-                            "昨日の収益": result["profit_text"],
-                            "APR":       result["apr_text"],
-                        }
+                    # ── モバイル: SmartVaultゾーンOCRを先に実行 ──
+                    result = self._ocr_smartvault_mobile_metrics(file_bytes, srow=srow_obj)
+                    liq_val    = result["total_liquidity"]
+                    profit_val = result["yesterday_profit"]
+                    apr_val    = result["apr_value"]
+                    boxes      = result["boxes"]
+                    texts      = {
+                        "流動性":     result["total_text"],
+                        "昨日の収益": result["profit_text"],
+                        "APR":       result["apr_text"],
+                    }
                 else:
                     result = self._ocr_pc_metrics(
                         file_bytes,
@@ -2267,6 +2323,10 @@ class AppUI:
                         "昨日の収益": result["profit_text"],
                         "APR":       result["apr_text"],
                     }
+                    # PC: 操作履歴から抽出した日時をセッションに保存
+                    _hist_dt = result.get("history_datetime")
+                    if _hist_dt:
+                        st.session_state["_pc_history_datetime"] = _hist_dt
 
             # ── Show preview and results ──
             label_prefix = "📱 SmartVaultモバイル" if is_mobile else "🖥️ PC"
@@ -2289,6 +2349,12 @@ class AppUI:
                     st.success(f"APR: {float(apr_val):.4f}%")
                 else:
                     st.warning("APR: 未検出")
+
+            # PC: 操作履歴の日時を表示
+            if not is_mobile:
+                _disp_dt = st.session_state.get("_pc_history_datetime")
+                if _disp_dt:
+                    st.caption(f"📅 操作履歴の日時: **{_disp_dt}**（手数料を回収）")
 
             # ── 使用座標を表で表示 ──
             b = boxes
@@ -2428,6 +2494,42 @@ class AppUI:
         today_key = U.fmt_date(U.now_jst())
         existing_apr_keys = self.repo.existing_apr_keys_for_date(today_key)
 
+        # ── ステップ4・5・6・7: 本日の積み上げデータ＋合算APR ──────────────
+        st.markdown("---")
+        st.markdown("#### 📋 本日の積み上げデータ")
+        today_sv_df = self.repo.load_today_smartvault_history(today_key, project)
+
+        _detected_device = st.session_state.get("_detected_device_type", "")
+
+        if not today_sv_df.empty:
+            # ステップ4: 重複チェック（PC/携帯横断）
+            if _detected_device and "Device_Type" in today_sv_df.columns:
+                same_device_df = today_sv_df[
+                    today_sv_df["Device_Type"].astype(str).str.strip().str.lower()
+                    == _detected_device.lower()
+                ]
+                if not same_device_df.empty:
+                    _dev_label = "📱 モバイル" if _detected_device == "mobile" else "🖥️ PC"
+                    st.warning(
+                        f"⚠️ 本日すでに {_dev_label} データが {len(same_device_df)} 件記録されています。"
+                        " 同一デバイスの重複登録になります。"
+                    )
+
+            # ステップ5: 日次積み上げ表示
+            _disp_cols = [c for c in ["Datetime_JST", "Device_Type", "APR", "Liquidity", "Yesterday_Profit", "Source_Mode"] if c in today_sv_df.columns]
+            st.dataframe(today_sv_df[_disp_cols].reset_index(drop=True), use_container_width=True, hide_index=True)
+
+            # ステップ6・7: PCだけ66% ／ 合算APR 計算
+            _combined_apr, _explanation = U.calc_combined_apr(today_sv_df)
+            if _combined_apr is not None:
+                st.info(f"🔢 **合算APR: {_combined_apr:.4f}%** — {_explanation}")
+                if st.button("⬆️ 合算APRをフォームに反映", key="use_combined_apr_btn"):
+                    st.session_state["_pending_input_sv_apr"] = f"{_combined_apr:.4f}"
+                    st.rerun()
+        else:
+            st.caption("（本日のSmartVaultデータはまだありません。APR確定時に記録されます）")
+        st.markdown("---")
+
         preview_rows: List[dict] = []
         total_members, total_principal, total_reward, skipped_members = 0, 0.0, 0.0, 0
 
@@ -2503,9 +2605,19 @@ class AppUI:
         with st.expander("個人別の本日配当（確認）", expanded=False):
             st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
 
+        # 保存前デバッグ情報
+        with st.expander("🔍 保存前デバッグ情報（問題診断用）", expanded=True):
+            st.write(f"apr={apr}, yesterday_profit={yesterday_profit}, total_liquidity={total_liquidity}")
+            st.write(f"total_members={total_members}, skip={skipped_members}, target_projects={target_projects}")
+            st.write(f"input_sv_apr={st.session_state.get('input_sv_apr','')}, input_sv_profit={st.session_state.get('input_sv_profit','')}")
+            st.write(f"Ledger sheet: {self.repo.gs.names.LEDGER} / namespace: '{AdminAuth.current_namespace()}'")
+            st.write(f"SmartVault_History sheet: {self.repo.gs.names.SMARTVAULT_HISTORY}")
+            if "_sv_write_ok" in st.session_state:
+                st.success(f"✅ SmartVault 前回書き込み: {st.session_state.pop('_sv_write_ok')}")
+            if "_sv_write_err" in st.session_state:
+                st.error(f"❌ SmartVault 前回書き込みエラー: {st.session_state.pop('_sv_write_err')}")
 
         if st.button("APRを確定して対象全員にLINE送信", key="apr_confirm_btn"):
-            st.write("⏳ 保存処理を開始します...")
             _save_warnings: List[str] = []
             try:
                 if apr <= 0:
@@ -2514,11 +2626,24 @@ class AppUI:
 
                 evidence_url = ""
                 if uploaded:
-                    _imgbb_url = ExternalService.upload_imgbb(uploaded.getvalue())
-                    if _imgbb_url:
-                        evidence_url = _imgbb_url
+                    import mimetypes as _mt
+                    _fname = getattr(uploaded, "name", "evidence.jpg")
+                    _mime = _mt.guess_type(_fname)[0] or "image/jpeg"
+
+                    # ① Google Drive にアップロード（サービスアカウントで権限不要）
+                    _drive_url = self.repo.gs.upload_image_to_drive(
+                        uploaded.getvalue(), _fname, _mime
+                    )
+                    if _drive_url:
+                        # =IMAGE("url") 式でセルに画像を直接表示
+                        evidence_url = f'=IMAGE("{_drive_url}")'
                     else:
-                        _save_warnings.append("ImgBBアップロード失敗（APIキー未設定の可能性）。エビデンスなしで保存します。")
+                        # ② フォールバック: ImgBB
+                        _imgbb_url = ExternalService.upload_imgbb(uploaded.getvalue())
+                        if _imgbb_url:
+                            evidence_url = _imgbb_url
+                        else:
+                            _save_warnings.append("画像アップロード失敗（Drive / ImgBB ともに失敗）。エビデンスなしで保存します。")
 
                 source_mode = U.detect_source_mode(
                     final_liquidity=float(total_liquidity),
@@ -2528,47 +2653,46 @@ class AppUI:
                     ocr_profit=st.session_state.get("ocr_yesterday_profit"),
                     ocr_apr=st.session_state.get("ocr_apr"),
                 )
+                # ステップ3: デバイス種別取得（OCR時に保存済み）
+                _device_type = st.session_state.get("_detected_device_type", "")
 
                 ts = U.fmt_dt(U.now_jst())
                 apr_ledger_count, line_log_count, success, fail, skip_count = 0, 0, 0, 0, 0
                 existing_apr_keys = self.repo.existing_apr_keys_for_date(today_key)
                 daily_add_map: Dict[Tuple[str, str], float] = {}
 
-                st.write(f"📝 SmartVault_History に書き込み中... (sheet: {self.repo.gs.names.SMARTVAULT_HISTORY})")
-                # SmartVault 履歴を記録
-                self.repo.append_smartvault_history(
-                    dt_jst=ts,
-                    project=project,
-                    liquidity=float(total_liquidity),
-                    yesterday_profit=float(yesterday_profit),
-                    apr=float(apr),
-                    source_mode=source_mode,
-                    ocr_liquidity=st.session_state.get("ocr_total_liquidity"),
-                    ocr_yesterday_profit=st.session_state.get("ocr_yesterday_profit"),
-                    ocr_apr=st.session_state.get("ocr_apr"),
-                    evidence_url=evidence_url or "",
-                    admin_name=AdminAuth.current_name(),
-                    admin_namespace=AdminAuth.current_namespace(),
-                    note="APR確定時に保存",
-                )
-                st.write("✅ SmartVault_History 書き込み完了")
+                # SmartVault 履歴を記録（個別エラーを捕捉して可視化）
+                try:
+                    self.repo.append_smartvault_history(
+                        dt_jst=ts,
+                        project=project,
+                        liquidity=float(total_liquidity),
+                        yesterday_profit=float(yesterday_profit),
+                        apr=float(apr),
+                        source_mode=source_mode,
+                        ocr_liquidity=st.session_state.get("ocr_total_liquidity"),
+                        ocr_yesterday_profit=st.session_state.get("ocr_yesterday_profit"),
+                        ocr_apr=st.session_state.get("ocr_apr"),
+                        evidence_url=evidence_url or "",
+                        admin_name=AdminAuth.current_name(),
+                        admin_namespace=AdminAuth.current_namespace(),
+                        note="APR確定時に保存",
+                        device_type=_device_type,  # ステップ3: pc / mobile
+                    )
+                    st.session_state["_sv_write_ok"] = f"{ts} / device={_device_type or '(未設定)'}"
+                except Exception as _sv_err:
+                    import traceback as _sv_tb
+                    st.session_state["_sv_write_err"] = f"{_sv_err}\n{_sv_tb.format_exc()[:600]}"
+                    _save_warnings.append(f"SmartVault_History 書き込みエラー: {_sv_err}")
 
-                # LINE トークン取得 — get_line_token は st.stop() を呼ぶため直接 secrets を参照する
-                _ns = AdminAuth.current_namespace()
-                _line_sec = st.secrets.get("line", {}) or {}
-                _line_tokens = _line_sec.get("tokens") or {}
-                token: Optional[str] = (
-                    (str(_line_tokens.get(_ns, "")).strip() if isinstance(_line_tokens, dict) else "")
-                    or str(_line_sec.get("channel_access_token", "")).strip()
-                    or None
-                )
-                if not token:
-                    _save_warnings.append(f"LINEトークン未設定 (ns={_ns})。LINE送信をスキップして保存のみ続行。")
+                # LINE トークン取得（失敗しても Ledger 書き込みは続ける）
+                token: Optional[str] = None
+                try:
+                    token = ExternalService.get_line_token(AdminAuth.current_namespace())
+                except Exception as _tok_e:
+                    _save_warnings.append(f"LINEトークン取得エラー（LINE送信をスキップ）: {_tok_e}")
 
-                # ── Ledger 行を全メンバー分まとめて収集してから一括書き込み ──
-                _ledger_rows: List[List[Any]] = []
-                _line_send_queue: List[Dict[str, Any]] = []  # LINE送信キュー
-
+                # Ledger 書き込み & LINE 送信
                 for p in target_projects:
                     _proj_row = settings_df[settings_df["Project_Name"] == str(p)].iloc[0]
                     project_net_factor = float(_proj_row.get("Net_Factor", AppConfig.FACTOR["MASTER"]))
@@ -2590,15 +2714,14 @@ class AppUI:
                             skip_count += 1
                             continue
 
-                        apr_note = (
+                        note = (
                             f"APR:{apr}%, "
                             f"Liquidity:{total_liquidity}, "
                             f"YesterdayProfit:{yesterday_profit}, "
                             f"SourceMode:{source_mode}, "
                             f"Mode:{r['CalcMode']}, Rank:{r['Rank']}, Factor:{r['Factor']}, CompoundTiming:{compound_timing}"
                         )
-                        # APR 行を収集
-                        _ledger_rows.append([ts, p, person, AppConfig.TYPE["APR"], daily_apr, apr_note, evidence_url or "", uid, disp, AppConfig.SOURCE["APP"]])
+                        self.repo.append_ledger(ts, p, person, AppConfig.TYPE["APR"], daily_apr, note, evidence_url or "", uid, disp)
                         existing_apr_keys.add(apr_key)
                         apr_ledger_count += 1
 
@@ -2619,41 +2742,28 @@ class AppUI:
                             f"現在運用額: {U.fmt_usd(current_principal)}\n"
                             f"複利タイプ: {U.compound_label(compound_timing)}\n"
                         )
+
                         if compound_timing == AppConfig.COMPOUND["DAILY"]:
                             personalized_msg += f"複利反映後運用額: {U.fmt_usd(person_after_amount)}\n"
 
-                        _line_send_queue.append({"p": p, "person": person, "uid": uid, "disp": disp, "msg": personalized_msg})
+                        if not uid or token is None:
+                            code, line_note = 0, "LINE未送信: Line_User_IDなしまたはトークン未取得"
+                        else:
+                            code = ExternalService.send_line_push(token, uid, personalized_msg, evidence_url)
+                            line_note = (
+                                f"HTTP:{code}, "
+                                f"Liquidity:{total_liquidity}, "
+                                f"YesterdayProfit:{yesterday_profit}, "
+                                f"APR:{apr}%, SourceMode:{source_mode}, CompoundTiming:{compound_timing}"
+                            )
 
-                # ── Ledger に一括書き込み ──
-                st.write(f"📝 Ledger に {len(_ledger_rows)} 行書き込み中... (sheet: {self.repo.gs.names.LEDGER})")
-                if _ledger_rows:
-                    self.repo.gs.append_rows_direct("LEDGER", _ledger_rows)
-                st.write(f"✅ Ledger APR書き込み完了 ({len(_ledger_rows)}行)")
+                        self.repo.append_ledger(ts, p, person, AppConfig.TYPE["LINE"], 0, line_note, evidence_url or "", uid, disp)
+                        line_log_count += 1
 
-                # ── LINE 送信 & LINE ログ行を収集して一括書き込み ──
-                _line_rows: List[List[Any]] = []
-                for _lq in _line_send_queue:
-                    _p, _person, _uid, _disp, _msg = _lq["p"], _lq["person"], _lq["uid"], _lq["disp"], _lq["msg"]
-                    if not _uid or token is None:
-                        code, line_note = 0, "LINE未送信: Line_User_IDなしまたはトークン未取得"
-                    else:
-                        code = ExternalService.send_line_push(token, _uid, _msg, evidence_url)
-                        line_note = (
-                            f"HTTP:{code}, "
-                            f"Liquidity:{total_liquidity}, "
-                            f"YesterdayProfit:{yesterday_profit}, "
-                            f"APR:{apr}%, SourceMode:{source_mode}"
-                        )
-                    _line_rows.append([ts, _p, _person, AppConfig.TYPE["LINE"], 0, line_note, evidence_url or "", _uid, _disp, AppConfig.SOURCE["APP"]])
-                    line_log_count += 1
-                    if code == 200:
-                        success += 1
-                    else:
-                        fail += 1
-
-                if _line_rows:
-                    self.repo.gs.append_rows_direct("LEDGER", _line_rows)
-                st.write(f"✅ LINE ログ書き込み完了 ({len(_line_rows)}行)")
+                        if code == 200:
+                            success += 1
+                        else:
+                            fail += 1
 
                 if daily_add_map:
                     for _di in range(len(members_df)):
@@ -3176,29 +3286,51 @@ Smart Vaultモバイル画面では固定ボックスで
 - APR
 を別々にOCRしています。
 
-### SmartVault履歴
+### 📱 / 🖥️ デバイス別 APR 採用ルール
+
+画像をOCRしたときに自動でデバイスを判定し、採用するAPR値が変わります。
+
+| デバイス | 採用APR | 理由 |
+|---------|--------|------|
+| 📱 **モバイル** | OCR取得APR をそのまま使用 | SmartVault の正確な値 |
+| 🖥️ **PC** | OCR取得APR × **66%** | PC表示は実際より高めに出るため補正 |
+
+複数回OCRした場合（PC＋モバイル）は **モバイル値を優先** します。
+
+---
+
+### 📊 SmartVault履歴
 APR確定時に `SmartVault_History` シートへ
 - 最終採用値
 - OCR取得値
 - Source_Mode（manual / ocr / ocr+manual）
+- Device_Type（pc / mobile）
 を保存します。
 
-### PERSONAL
+---
+
+### 💰 個人への分配計算
+
+#### PERSONAL
 個人ごとの元本で計算します。
 
-`DailyAPR = Principal × (最終APR% / 100) × Rank係数 ÷ 365`
+`DailyAPR = Principal × (採用APR% / 100) × Rank係数 ÷ 365`
 
 - Master = 0.67
 - Elite = 0.60
 
-### GROUP（PERSONAL以外）
+#### GROUP（PERSONAL以外）
 グループ総額を基準に計算し、人数で均等割します。
 
-`グループ総配当 = グループ総元本 × (最終APR% / 100) × Net_Factor ÷ 365`
+`グループ総配当 = グループ総元本 × (採用APR% / 100) × Net_Factor ÷ 365`
 
 `1人あたり配当 = グループ総配当 ÷ 人数`
 
-### 重複防止
+> **採用APR** = PC画像なら元のAPR × 0.66、モバイル画像なら元のAPRのまま
+
+---
+
+### 🔄 重複防止
 同日・同一プロジェクト・同一人物の APR は Ledger を見て1回だけ記録します。
 本日のAPRをやり直したい場合は、APR画面の「本日のAPR記録をリセット」を使います。
 """
