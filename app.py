@@ -1998,15 +1998,11 @@ class AppUI:
         Liquidity and profit zones come from Settings (PC_Liq_* / PC_Profit_*).
         APR zone uses the existing Crop_* values already resolved by the caller.
         """
+        # PC座標は常にコードのデフォルト値を使用
+        # （Settingsシートに古い値が保存されていても上書きされないよう srow を無視）
         d = AppConfig.PC_BOX_DEFAULTS
-        if srow is not None:
-            def _r(key: str) -> float:
-                return U.to_ratio(srow.get(key, d[key]), d[key])
-            liq_box = {"left": _r("PC_Liq_Left"), "top": _r("PC_Liq_Top"), "right": _r("PC_Liq_Right"), "bottom": _r("PC_Liq_Bottom")}
-            profit_box = {"left": _r("PC_Profit_Left"), "top": _r("PC_Profit_Top"), "right": _r("PC_Profit_Right"), "bottom": _r("PC_Profit_Bottom")}
-        else:
-            liq_box = {"left": d["PC_Liq_Left"], "top": d["PC_Liq_Top"], "right": d["PC_Liq_Right"], "bottom": d["PC_Liq_Bottom"]}
-            profit_box = {"left": d["PC_Profit_Left"], "top": d["PC_Profit_Top"], "right": d["PC_Profit_Right"], "bottom": d["PC_Profit_Bottom"]}
+        liq_box = {"left": d["PC_Liq_Left"], "top": d["PC_Liq_Top"], "right": d["PC_Liq_Right"], "bottom": d["PC_Liq_Bottom"]}
+        profit_box = {"left": d["PC_Profit_Left"], "top": d["PC_Profit_Top"], "right": d["PC_Profit_Right"], "bottom": d["PC_Profit_Bottom"]}
         apr_box = {"left": crop_left, "top": crop_top, "right": crop_right, "bottom": crop_bottom}
         return {"TOTAL_LIQUIDITY": liq_box, "YESTERDAY_PROFIT": profit_box, "APR": apr_box}
 
