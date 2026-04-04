@@ -579,6 +579,22 @@ class U:
         return in_range[-1] if in_range else None
 
     @staticmethod
+    def pick_prev_fee_amount(vals: List[float], min_v: float = 1.0, max_v: float = 500_000.0) -> Optional[float]:
+        """操作履歴パネル OCR 用: 手数料を回収エントリの1日前（末尾から2番目）$ 値を返す。
+
+        エントリが1件のみの場合はその値を返す。
+        """
+        in_range = [float(v) for v in vals if min_v <= float(v) <= max_v]
+        if len(in_range) >= 2:
+            return in_range[-2]
+        return in_range[-1] if in_range else None
+
+    @staticmethod
+    def sum_fee_amounts(vals: List[float], min_v: float = 1.0, max_v: float = 500_000.0) -> float:
+        """操作履歴パネル OCR 用: 範囲内の全手数料を回収エントリの合計額を返す。"""
+        return sum(float(v) for v in vals if min_v <= float(v) <= max_v)
+
+    @staticmethod
     def extract_history_datetime(text: str) -> Optional[str]:
         """操作履歴パネルの OCR テキストから最新の日時文字列を抽出する。
 
@@ -2019,8 +2035,12 @@ class AppUI:
 
         # 流動性: 最大値（提供した流動性の合計）
         total_liquidity = U.pick_total_liquidity(liq_vals)
-        # 昨日の収益: 操作履歴の最新「手数料を回収」= テキスト末尾の $ 値
-        yesterday_profit = U.pick_last_fee_amount(profit_vals)
+        # 昨日の収益: 1日前エントリ（末尾から2番目）の$ 値
+        yesterday_profit = U.pick_prev_fee_amount(profit_vals)
+        # 今日の手数料: 最新エントリ（末尾）の$ 値
+        today_fee = U.pick_last_fee_amount(profit_vals)
+        # 手数料合計: 全エントリ合計
+        total_fees = U.sum_fee_amounts(profit_vals)
         apr_value = apr_vals[0] if apr_vals else None
 
         if total_liquidity is None:
@@ -2034,7 +2054,10 @@ class AppUI:
         if yesterday_profit is None:
             retry_text = self._ocr_crop_text(file_bytes, self._expand_box(boxes["YESTERDAY_PROFIT"], margin))
             retry_vals = U.extract_usd_candidates(retry_text)
-            yesterday_profit = U.pick_last_fee_amount(retry_vals) or yesterday_profit
+            yesterday_profit = U.pick_prev_fee_amount(retry_vals) or yesterday_profit
+            if not today_fee:
+                today_fee = U.pick_last_fee_amount(retry_vals)
+            total_fees = U.sum_fee_amounts(retry_vals) or total_fees
             if retry_vals:
                 profit_text += f"\n[retry] {retry_text}"
                 profit_vals = retry_vals
@@ -2061,7 +2084,9 @@ class AppUI:
             "profit_vals": profit_vals,
             "apr_vals": apr_vals,
             "total_liquidity": total_liquidity,
-            "yesterday_profit": yesterday_profit,
+            "yesterday_profit": yesterday_profit,   # 1日前エントリの$ 値
+            "today_fee": today_fee,                  # 最新エントリの$ 値
+            "total_fees": total_fees,                # 全手数料合計
             "apr_value": apr_value,
             "history_datetime": history_datetime,  # 最新手数料を回収の日時
             "boxed_preview": boxed_preview,
@@ -2323,10 +2348,12 @@ class AppUI:
                         "昨日の収益": result["profit_text"],
                         "APR":       result["apr_text"],
                     }
-                    # PC: 操作履歴から抽出した日時をセッションに保存
+                    # PC: 操作履歴から抽出した日時・手数料合計をセッションに保存
                     _hist_dt = result.get("history_datetime")
                     if _hist_dt:
                         st.session_state["_pc_history_datetime"] = _hist_dt
+                    st.session_state["_pc_total_fees"] = result.get("total_fees", 0.0)
+                    st.session_state["_pc_today_fee"] = result.get("today_fee")
 
             # ── Show preview and results ──
             label_prefix = "📱 SmartVaultモバイル" if is_mobile else "🖥️ PC"
@@ -2410,15 +2437,25 @@ class AppUI:
                     if usdc_rows:
                         # ボタンクリック時の再レンダリングでも参照できるようsession_stateに保存
                         total_amount = sum(r["amount"] for r in usdc_rows)
+                        # 日付別に集計 → 最新日付=今日、その前日=昨日
+                        from collections import defaultdict as _dd
+                        _date_totals: dict = _dd(float)
+                        for _ur in usdc_rows:
+                            _date_totals[_ur["date_str"]] += _ur["amount"]
+                        _sorted_dates = sorted(_date_totals.keys())
+                        _most_recent_date = _sorted_dates[-1] if _sorted_dates else None
+                        _prev_date = _sorted_dates[-2] if len(_sorted_dates) >= 2 else None
+                        _today_usdc = _date_totals.get(_most_recent_date, 0.0) if _most_recent_date else 0.0
+                        _yest_usdc = _date_totals.get(_prev_date, 0.0) if _prev_date else 0.0
                         # session_state に保存（ボタンクリック後の再レンダリングでも参照できるようにする）
                         st.session_state["_usdc_rows_cache"] = usdc_rows
                         st.session_state["_usdc_project_cache"] = str(project)
                         st.session_state["_usdc_raw_text_cache"] = usdc_result.get("raw_text", "")
                         st.session_state["_usdc_total_cache"] = total_amount
-                        # SmartVaultと同様に昨日の収益＋APR%を自動セットして即rerun
-                        # ※ _pending_input_sv_* 経由で render_apr 先頭で widget key にセット
-                        st.session_state["_pending_input_sv_profit"] = f"{total_amount:,.2f}"
-                        st.session_state["ocr_yesterday_profit"] = total_amount
+                        st.session_state["_today_usdc_total"] = _today_usdc
+                        # 昨日の収益 = 最新日付より前日のUSDC合計
+                        st.session_state["_pending_input_sv_profit"] = f"{_yest_usdc:,.2f}"
+                        st.session_state["ocr_yesterday_profit"] = _yest_usdc
                         try:
                             _srow = settings_df[settings_df["Project_Name"] == str(project)].iloc[0]
                             _factor = float(_srow.get("Net_Factor", AppConfig.FACTOR["MASTER"]))
@@ -2427,7 +2464,8 @@ class AppUI:
                             _mem_active = self.repo.project_members_active(members_df, project)
                             _total_principal = float(_mem_active["Principal"].sum()) if not _mem_active.empty else 0.0
                             if _total_principal > 0 and _factor > 0:
-                                _auto_apr = (total_amount / (_total_principal * _factor)) * 365.0 * 100.0
+                                # APR%は今日のUSDC合計から算出
+                                _auto_apr = (_today_usdc / (_total_principal * _factor)) * 365.0 * 100.0
                                 st.session_state["_pending_input_sv_apr"] = f"{_auto_apr:.4f}"
                                 st.session_state["ocr_apr"] = _auto_apr
                         except Exception:
@@ -2594,11 +2632,32 @@ class AppUI:
                         st.stop()
 
         with csum2:
+            # 画像タイプ別にサマリー表示を切り替え
+            _sum_dev = st.session_state.get("_detected_device_type", "")
+            _sum_is_usdc = bool(st.session_state.get("_usdc_rows_cache"))
+            if _sum_dev == "pc":
+                # PC: APR合計=手数料合計 / 今日のAPR=最終エントリ日時 / 実効APR=66%固定
+                _sum_total_fees = st.session_state.get("_pc_total_fees", 0.0)
+                _sum_hist_dt = st.session_state.get("_pc_history_datetime", "未検出")
+                _sum_line1_right = f"APR合計: **{U.fmt_usd(_sum_total_fees)}**"
+                _sum_line2_mid   = f"今日のAPR: **{_sum_hist_dt}**"
+                _sum_line2_right = "実効APR: **66.0000%**"
+            elif _sum_is_usdc:
+                # モバイル USDC: APR合計=今日USDC合計 / 実効APR通常表示
+                _sum_today_usdc = st.session_state.get("_today_usdc_total", 0.0)
+                _sum_line1_right = f"APR合計: **{U.fmt_usd(_sum_today_usdc)}**"
+                _sum_line2_mid   = f"APR合計: **{U.fmt_usd(total_reward)}**"
+                _sum_line2_right = f"実効APR: **{apr_percent_display:.4f}%**"
+            else:
+                # SmartVault モバイル: 従来表示
+                _sum_line1_right = f"最終APR: **{apr:.4f}%**"
+                _sum_line2_mid   = f"APR合計: **{U.fmt_usd(total_reward)}**"
+                _sum_line2_right = f"実効APR: **{apr_percent_display:.4f}%**"
             st.markdown(
                 f"""
-**本日対象サマリー**  
-流動性: **{U.fmt_usd(total_liquidity)}**　/　昨日の収益: **{U.fmt_usd(yesterday_profit)}**　/　最終APR: **{apr:.4f}%**  
-総投資額: **{U.fmt_usd(total_principal)}**　/　APR合計: **{U.fmt_usd(total_reward)}**　/　実効APR: **{apr_percent_display:.4f}%**
+**本日対象サマリー**
+流動性: **{U.fmt_usd(total_liquidity)}**　/　昨日の収益: **{U.fmt_usd(yesterday_profit)}**　/　{_sum_line1_right}
+総投資額: **{U.fmt_usd(total_principal)}**　/　{_sum_line2_mid}　/　{_sum_line2_right}
 """
             )
 
