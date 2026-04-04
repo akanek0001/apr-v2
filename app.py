@@ -2025,6 +2025,9 @@ class AppUI:
         margin = AppConfig.OCR_EXPAND_MARGIN
         boxes = self._build_pc_boxes(srow, crop_left, crop_top, crop_right, crop_bottom)
 
+        # PC画面がダークモード（黄色テキスト・暗背景）の場合は反転してOCR精度を向上
+        file_bytes = U.maybe_invert_dark(file_bytes)
+
         liq_text = self._ocr_crop_text(file_bytes, boxes["TOTAL_LIQUIDITY"])
         profit_text = self._ocr_crop_text(file_bytes, boxes["YESTERDAY_PROFIT"])
         apr_text = self._ocr_crop_text(file_bytes, boxes["APR"])
@@ -2360,28 +2363,51 @@ class AppUI:
             st.markdown(f"#### {label_prefix} OCR結果")
             st.image(result["boxed_preview"], caption="赤枠 = OCR対象範囲", use_container_width=True)
 
-            c_a, c_b, c_c = st.columns(3)
-            with c_a:
-                if liq_val is not None:
-                    st.success(f"流動性: {U.fmt_usd(float(liq_val))}")
-                else:
-                    st.warning("流動性: 未検出")
-            with c_b:
-                if profit_val is not None:
-                    st.success(f"昨日の収益: {U.fmt_usd(float(profit_val))}")
-                else:
-                    st.warning("昨日の収益: 未検出")
-            with c_c:
-                if apr_val is not None:
-                    st.success(f"APR: {float(apr_val):.4f}%")
-                else:
-                    st.warning("APR: 未検出")
-
-            # PC: 操作履歴の日時を表示
             if not is_mobile:
-                _disp_dt = st.session_state.get("_pc_history_datetime")
-                if _disp_dt:
-                    st.caption(f"📅 操作履歴の日時: **{_disp_dt}**（手数料を回収）")
+                # PC: 4カラム表示（流動性・1日前手数料・今日手数料・手数料合計）
+                _pc_today_f = result.get("today_fee") if result else None
+                _pc_tot_f   = result.get("total_fees", 0.0) if result else 0.0
+                _pc_dt_disp = st.session_state.get("_pc_history_datetime", "未検出")
+                ca, cb, cc, cd = st.columns(4)
+                with ca:
+                    if liq_val is not None:
+                        st.success(f"流動性合計\n{U.fmt_usd(float(liq_val))}")
+                    else:
+                        st.warning("流動性合計: 未検出")
+                    st.caption("提供した流動性の合計")
+                with cb:
+                    if profit_val is not None:
+                        st.success(f"昨日の収益\n{U.fmt_usd(float(profit_val))}")
+                    else:
+                        st.warning("昨日の収益: 未検出")
+                    st.caption("手数料を回収（1日前）")
+                with cc:
+                    if _pc_today_f is not None:
+                        st.success(f"今日の手数料\n{U.fmt_usd(float(_pc_today_f))}")
+                    else:
+                        st.warning("今日の手数料: 未検出")
+                    st.caption("手数料を回収（最新）")
+                with cd:
+                    st.info(f"手数料合計\n{U.fmt_usd(float(_pc_tot_f))}")
+                    st.caption(f"📅 {_pc_dt_disp}")
+            else:
+                # モバイル: 3カラム表示
+                c_a, c_b, c_c = st.columns(3)
+                with c_a:
+                    if liq_val is not None:
+                        st.success(f"流動性: {U.fmt_usd(float(liq_val))}")
+                    else:
+                        st.warning("流動性: 未検出")
+                with c_b:
+                    if profit_val is not None:
+                        st.success(f"昨日の収益: {U.fmt_usd(float(profit_val))}")
+                    else:
+                        st.warning("昨日の収益: 未検出")
+                with c_c:
+                    if apr_val is not None:
+                        st.success(f"APR: {float(apr_val):.4f}%")
+                    else:
+                        st.warning("APR: 未検出")
 
             # ── 使用座標を表で表示 ──
             b = boxes
@@ -2560,7 +2586,23 @@ class AppUI:
             # ステップ6・7: PCだけ66% ／ 合算APR 計算
             _combined_apr, _explanation = U.calc_combined_apr(today_sv_df)
             if _combined_apr is not None:
-                st.info(f"🔢 **合算APR: {_combined_apr:.4f}%** — {_explanation}")
+                _dev_now = st.session_state.get("_detected_device_type", "")
+                if _dev_now == "pc":
+                    # PC: 手数料合計$＋最終日時を表示
+                    _comb_fees = st.session_state.get("_pc_total_fees", 0.0)
+                    _comb_dt   = st.session_state.get("_pc_history_datetime", "")
+                    _comb_yest = st.session_state.get("ocr_yesterday_profit", 0.0) or 0.0
+                    _comb_today_f = st.session_state.get("_pc_today_fee")
+                    _comb_info = (
+                        f"🖥️ **PC手数料** — 1日前: **{U.fmt_usd(_comb_yest)}**"
+                        + (f" ／ 今日: **{U.fmt_usd(float(_comb_today_f))}**" if _comb_today_f else "")
+                        + f" ／ 合計: **{U.fmt_usd(_comb_fees)}**"
+                        + (f" ／ 日時: {_comb_dt}" if _comb_dt else "")
+                    )
+                    st.info(_comb_info)
+                    st.caption(f"APR算出参考値: {_combined_apr:.4f}% — {_explanation}")
+                else:
+                    st.info(f"🔢 **合算APR: {_combined_apr:.4f}%** — {_explanation}")
                 if st.button("⬆️ 合算APRをフォームに反映", key="use_combined_apr_btn"):
                     st.session_state["_pending_input_sv_apr"] = f"{_combined_apr:.4f}"
                     st.rerun()
@@ -2635,28 +2677,42 @@ class AppUI:
             # 画像タイプ別にサマリー表示を切り替え
             _sum_dev = st.session_state.get("_detected_device_type", "")
             _sum_is_usdc = bool(st.session_state.get("_usdc_rows_cache"))
+            _sum_dt_label = st.session_state.get("_detected_device_time", "")
             if _sum_dev == "pc":
                 # PC: APR合計=手数料合計 / 今日のAPR=最終エントリ日時 / 実効APR=66%固定
                 _sum_total_fees = st.session_state.get("_pc_total_fees", 0.0)
                 _sum_hist_dt = st.session_state.get("_pc_history_datetime", "未検出")
+                _sum_today_f = st.session_state.get("_pc_today_fee")
+                _sum_device_label = f"🖥️ PC画像 ({_sum_dt_label})"
                 _sum_line1_right = f"APR合計: **{U.fmt_usd(_sum_total_fees)}**"
                 _sum_line2_mid   = f"今日のAPR: **{_sum_hist_dt}**"
                 _sum_line2_right = "実効APR: **66.0000%**"
+                # PC追加行: 1日前と今日の手数料を明示
+                _pc_extra = (
+                    f"手数料（1日前）: **{U.fmt_usd(float(yesterday_profit or 0))}**"
+                    + (f"　/　手数料（今日）: **{U.fmt_usd(float(_sum_today_f))}**" if _sum_today_f else "")
+                )
             elif _sum_is_usdc:
                 # モバイル USDC: APR合計=今日USDC合計 / 実効APR通常表示
                 _sum_today_usdc = st.session_state.get("_today_usdc_total", 0.0)
+                _sum_device_label = f"📱 モバイル USDC ({_sum_dt_label})"
                 _sum_line1_right = f"APR合計: **{U.fmt_usd(_sum_today_usdc)}**"
                 _sum_line2_mid   = f"APR合計: **{U.fmt_usd(total_reward)}**"
                 _sum_line2_right = f"実効APR: **{apr_percent_display:.4f}%**"
+                _pc_extra = ""
             else:
                 # SmartVault モバイル: 従来表示
+                _sum_device_label = f"📱 SmartVaultモバイル ({_sum_dt_label})" if _sum_dev == "mobile" else ""
                 _sum_line1_right = f"最終APR: **{apr:.4f}%**"
                 _sum_line2_mid   = f"APR合計: **{U.fmt_usd(total_reward)}**"
                 _sum_line2_right = f"実効APR: **{apr_percent_display:.4f}%**"
+                _pc_extra = ""
+            _extra_line = f"\n{_pc_extra}" if _pc_extra else ""
+            _device_line = f"\n*{_sum_device_label}*" if _sum_device_label else ""
             st.markdown(
                 f"""
-**本日対象サマリー**
-流動性: **{U.fmt_usd(total_liquidity)}**　/　昨日の収益: **{U.fmt_usd(yesterday_profit)}**　/　{_sum_line1_right}
+**本日対象サマリー**{_device_line}
+流動性: **{U.fmt_usd(total_liquidity)}**　/　昨日の収益: **{U.fmt_usd(yesterday_profit)}**　/　{_sum_line1_right}{_extra_line}
 総投資額: **{U.fmt_usd(total_principal)}**　/　{_sum_line2_mid}　/　{_sum_line2_right}
 """
             )
