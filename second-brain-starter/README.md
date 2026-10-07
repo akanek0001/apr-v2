@@ -18,6 +18,7 @@
 | `/invest-review` | 投資の月次レビューを作成 |
 | `/apr-log <日付/数値/画像>` | APR分配の日次記録を作成(通知は送らない) |
 | `/apr-month` | APR分配の月次まとめを作成 |
+| `/clip` | Web Clipper で溜めたクリップを分類・要約・リンク(`Clipper/README.md` 参照) |
 | `/inbox` | Inbox の分類を提案(承認後に移動) |
 | `/connect <ノート>` | 関連ノートへのリンクを提案 |
 | `/ask <質問>` | vault のノートだけを根拠に回答 |

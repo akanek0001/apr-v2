@@ -45,6 +45,7 @@
 
 ## 情報源ごとの扱い
 - **Web記事/PDF**: `40_Resources/Articles/`。`/digest` を使う
+- **Web Clipper のクリップ**: `00_Inbox/` に `type: clip` / `status: unprocessed` で入る。`/clip` で処理する(設定は `Clipper/README.md`)。クリップ本文に無いことは書かない
 - **動画 (YouTube等)**: `40_Resources/Videos/`。字幕・文字起こしが取れる場合のみ要約し、取れなければその旨を書く
 - **SNS (X/Threads/Instagram 等)**: `40_Resources/Social/`。投稿の要旨・投稿者・日付・URL。ログイン必須で取得できない時は、貼り付けてもらった本文だけを扱う
 - **会議録 (Fireflies)**: `40_Resources/Meetings/`。決定事項 / TODO(担当・期限) / 論点 を必ず抽出
