@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Inbox Clip",
+  "behavior": "create",
+  "noteContentFormat": "# {{title}}\n\n> 出典: {{url}}\n\n{{selection|blockquote}}\n\n{{content}}",
+  "properties": [
+    { "name": "type", "value": "clip", "type": "text" },
+    { "name": "status", "value": "unprocessed", "type": "text" },
+    { "name": "source", "value": "{{url}}", "type": "text" },
+    { "name": "site", "value": "{{site}}", "type": "text" },
+    { "name": "author", "value": "{{author}}", "type": "text" },
+    { "name": "published", "value": "{{published}}", "type": "text" },
+    { "name": "created", "value": "{{date|date:\"YYYY-MM-DD\"}}", "type": "date" },
+    { "name": "tags", "value": "clip", "type": "multitext" }
+  ],
+  "triggers": [],
+  "noteNameFormat": "{{title}}",
+  "path": "00_Inbox"
+}
