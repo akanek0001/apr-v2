@@ -37,6 +37,12 @@
 - 数字(金額・損益)はノートにあるものだけを使う。無い数字を推測で埋めない
 - 「撤退・見直し条件」と「後から振り返る欄」は私が決める・書く。Claude は空欄を指摘するだけ
 
+## APR分配の記録
+- `30_Areas/Investing/APR/` に `Templates/AprDistribution.md` で日次、`AprMonthly.md` で月次を作る
+- 項目は `app.py` のシート定義(Liquidity / Yesterday_Profit / APR / USDC履歴 / Asset_Ratio)に合わせてある。記録の正本は Sheets 側で、vault は控えと振り返り用
+- 読み取れない値は「不明」。分配額は計算式を併記し、ルールが無ければ私に聞く
+- 投資家名・金額は個人情報なので、vault の外へ共有しない
+
 ## 情報源ごとの扱い
 - **Web記事/PDF**: `40_Resources/Articles/`。`/digest` を使う
 - **動画 (YouTube等)**: `40_Resources/Videos/`。字幕・文字起こしが取れる場合のみ要約し、取れなければその旨を書く
