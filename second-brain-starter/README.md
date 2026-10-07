@@ -14,6 +14,8 @@
 | `/digest <URL/PDF>` | 記事・動画・SNS・PDF を要約して保存 |
 | `/meeting` | Fireflies の会議録をノート化 |
 | `/mail` | Gmail の重要メールを要点だけ Inbox へ |
+| `/invest <対象と内容>` | 投資の判断・情報を投資ノートに記録(売買推奨なし) |
+| `/invest-review` | 投資の月次レビューを作成 |
 | `/inbox` | Inbox の分類を提案(承認後に移動) |
 | `/connect <ノート>` | 関連ノートへのリンクを提案 |
 | `/ask <質問>` | vault のノートだけを根拠に回答 |
